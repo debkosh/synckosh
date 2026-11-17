@@ -153,10 +153,10 @@ func (s *Server) check(raw json.RawMessage) (synckosh.Item, string) {
 		return it, "type: lowercase letters, digits, dot, dash or underscore, up to 64"
 	case !guidRe.MatchString(it.GUID):
 		return it, "guid: letters, digits and ._:~- up to 128"
-	case it.TS <= 0:
-		return it, "ts: the time of the edit, in milliseconds"
-	case it.TS > s.now().Add(synckosh.MaxAhead).UnixMilli():
-		return it, "ts is more than a day ahead of the server's clock"
+	case it.Timestamp <= 0:
+		return it, "timestamp: the time of the edit, in milliseconds"
+	case it.Timestamp > s.now().Add(synckosh.MaxAhead).UnixMilli():
+		return it, "timestamp is more than a day ahead of the server's clock"
 	}
 	it.Seen, it.DeletedAt = 0, 0 // the server's to set
 	return it, ""
@@ -208,7 +208,7 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 			internal(w, r, err)
 			return
 		}
-		if has && it.TS < cur.TS {
+		if has && it.Timestamp < cur.Timestamp {
 			c := cur
 			res[i] = Result{Current: &c}
 			continue

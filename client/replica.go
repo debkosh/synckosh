@@ -123,7 +123,7 @@ func (r *Replica) write(its ...synckosh.Item) error {
 	ts := r.clock.Now()
 	es := make([]Entry, len(its))
 	for i := range its {
-		its[i].TS = ts
+		its[i].Timestamp = ts
 		es[i] = Entry{Item: its[i], Pending: true}
 	}
 	if err := r.local.Put(es...); err != nil {
@@ -148,7 +148,7 @@ func (r *Replica) Items(bucket string) ([]synckosh.Item, error) {
 	var cleared int64
 	err := r.local.Each(bucket, func(e Entry) error {
 		if e.Item.Type == ClearType {
-			cleared = max(cleared, e.Item.TS)
+			cleared = max(cleared, e.Item.Timestamp)
 			return nil
 		}
 		all = append(all, e.Item)
@@ -159,7 +159,7 @@ func (r *Replica) Items(bucket string) ([]synckosh.Item, error) {
 	}
 	out := all[:0]
 	for _, it := range all {
-		if !it.Deleted && it.TS > cleared {
+		if !it.Deleted && it.Timestamp > cleared {
 			out = append(out, it)
 		}
 	}
@@ -293,12 +293,12 @@ func (r *Replica) take(remote synckosh.Item) (Entry, bool, error) {
 	if err != nil {
 		return Entry{}, false, err
 	}
-	r.clock.Observe(remote.TS)
+	r.clock.Observe(remote.Timestamp)
 	e, has, err := r.local.Get(remote.Bucket, remote.GUID)
 	if err != nil {
 		return Entry{}, false, err
 	}
-	if has && e.Item.TS > remote.TS {
+	if has && e.Item.Timestamp > remote.Timestamp {
 		return Entry{}, false, nil // this device's version is later, and is pushed
 	}
 	return Entry{Item: remote}, true, nil
@@ -313,7 +313,7 @@ func (r *Replica) push(ctx context.Context) (restart bool, err error) {
 		}
 		pending = append(pending, p...)
 	}
-	sort.Slice(pending, func(i, j int) bool { return pending[i].Item.TS < pending[j].Item.TS })
+	sort.Slice(pending, func(i, j int) bool { return pending[i].Item.Timestamp < pending[j].Item.Timestamp })
 	for len(pending) > 0 {
 		n := min(len(pending), 1000)
 		batch := pending[:n]

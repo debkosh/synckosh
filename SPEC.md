@@ -26,7 +26,7 @@ the reference: `client` for a device, `server` for the server, `bolt` for storag
   "bucket": "logins",
   "type": "login-field",
   "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d07",
-  "ts": 1763380800000,
+  "timestamp": 1763380800000,
   "deleted": false,
   "public": {"parent": "019a8f3c-5e1f-7a10-8b2e-1c5d0f3a9e42", "key": "password"},
   "private": {"key": "k_sUwGzUYSPw", "box": "7lg3iKfl2s0W…"},
@@ -40,7 +40,7 @@ the reference: `client` for a device, `server` for the server, `bolt` for storag
 | `bucket` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of buckets only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64. |
 | `type` | device | what the item is, for the client: `folder`, `bookmark`, `login`, `login-field`. Same characters. |
 | `guid` | device | a UUIDv7 for a new item ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), so guids sort by when they were made. An edit keeps the guid. Letters, digits, `._:~-`, up to 128. |
-| `ts` | device | when the edit was made: the device's clock, in milliseconds. |
+| `timestamp` | device | when the edit was made: the device's clock, in milliseconds. |
 | `deleted` | device | true for a deleted item. |
 | `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |
 | `private` | device | JSON sealed with the account's data key. |
@@ -69,7 +69,7 @@ device made an edit.
 
 The private part is sealed with XChaCha20-Poly1305 under the account's data key:
 `{"key": "<data key id>", "box": "<base64 of 24-byte nonce and ciphertext>"}`. The additional
-data is the JSON array `[bucket, type, guid, ts, deleted, public]`, so the server can't change
+data is the JSON array `[bucket, type, guid, timestamp, deleted, public]`, so the server can't change
 the public part, or move a private part to another item, without the device noticing.
 
 Structure is public and content is private. For example:

@@ -17,7 +17,7 @@ type Item struct {
 	Bucket    string
 	Type      string
 	GUID      string
-	TS        int64 // when the edit was made, the device's clock in milliseconds
+	Timestamp int64 // when the edit was made, the device's clock in milliseconds
 	Deleted   bool
 	Public    json.RawMessage
 	Private   json.RawMessage
@@ -26,7 +26,7 @@ type Item struct {
 	Extra     map[string]json.RawMessage
 }
 
-var known = map[string]bool{"bucket": true, "type": true, "guid": true, "ts": true, "deleted": true,
+var known = map[string]bool{"bucket": true, "type": true, "guid": true, "timestamp": true, "deleted": true,
 	"public": true, "private": true, "seen": true, "deleted_at": true}
 
 func (it Item) MarshalJSON() ([]byte, error) {
@@ -41,7 +41,7 @@ func (it Item) MarshalJSON() ([]byte, error) {
 	set("bucket", it.Bucket)
 	set("type", it.Type)
 	set("guid", it.GUID)
-	set("ts", it.TS)
+	set("timestamp", it.Timestamp)
 	set("deleted", it.Deleted)
 	if len(it.Public) > 0 {
 		m["public"] = it.Public
@@ -64,7 +64,7 @@ func (it *Item) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	var v Item
-	fields := map[string]any{"bucket": &v.Bucket, "type": &v.Type, "guid": &v.GUID, "ts": &v.TS,
+	fields := map[string]any{"bucket": &v.Bucket, "type": &v.Type, "guid": &v.GUID, "timestamp": &v.Timestamp,
 		"deleted": &v.Deleted, "seen": &v.Seen, "deleted_at": &v.DeletedAt}
 	for k, dst := range fields {
 		if raw, ok := m[k]; ok {
@@ -130,6 +130,6 @@ func bound(it Item) []byte {
 	} else {
 		pub.WriteString("null")
 	}
-	b, _ := json.Marshal([]any{it.Bucket, it.Type, it.GUID, it.TS, it.Deleted, json.RawMessage(pub.Bytes())})
+	b, _ := json.Marshal([]any{it.Bucket, it.Type, it.GUID, it.Timestamp, it.Deleted, json.RawMessage(pub.Bytes())})
 	return b
 }

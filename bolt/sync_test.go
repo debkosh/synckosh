@@ -214,7 +214,7 @@ func TestSameMillisecondLaterPushWins(t *testing.T) {
 	sync(t, mac, phone)
 	for _, d := range []*device{mac, phone} {
 		it, _, _ := d.Get("settings", s.GUID)
-		if it.TS != s.TS || private(t, it)["value"] != "light" {
+		if it.Timestamp != s.Timestamp || private(t, it)["value"] != "light" {
 			t.Fatalf("%s kept %s, want the later push", d.name, it.Private)
 		}
 	}
@@ -309,8 +309,8 @@ func TestNewStoreIDRefills(t *testing.T) {
 	}
 	it, _, _ := st.Get("me", "bookmarks", a.GUID)
 	orig, _, _ := mac.Get("bookmarks", a.GUID)
-	if it.TS != orig.TS {
-		t.Fatalf("refilled with a new timestamp: %v, was %v", it.TS, orig.TS)
+	if it.Timestamp != orig.Timestamp {
+		t.Fatalf("refilled with a new timestamp: %v, was %v", it.Timestamp, orig.Timestamp)
 	}
 	gone, has, _ := st.Get("me", "bookmarks", b.GUID)
 	if !has || !gone.Deleted {
@@ -355,12 +355,12 @@ func TestReopenKeepsEverything(t *testing.T) {
 		Local: mac.local, Key: e.key, Buckets: []string{"bookmarks"}})
 	sync(t, mac) // the edit made before reopening is still pending, and goes out
 	it, has, _ := e.store.Get("me", "bookmarks", b.GUID)
-	if !has || it.TS != b.TS {
+	if !has || it.Timestamp != b.Timestamp {
 		t.Fatalf("after reopening: %v %+v", has, it)
 	}
 	b2 := put(t, mac, bookmark("root", "Go docs"))
-	if b2.TS <= b.TS {
-		t.Fatalf("the clock went back after reopening: %v then %v", b.TS, b2.TS)
+	if b2.Timestamp <= b.Timestamp {
+		t.Fatalf("the clock went back after reopening: %v then %v", b.Timestamp, b2.Timestamp)
 	}
 }
 
@@ -369,7 +369,7 @@ func TestServerChecks(t *testing.T) {
 	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
 	ctx := context.Background()
 	now := time.Now().UnixMilli()
-	it := synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme", TS: now,
+	it := synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme", Timestamp: now,
 		Extra: map[string]json.RawMessage{"later": json.RawMessage(`{"x":1}`)}}
 	for i := 0; i < 2; i++ {
 		res, err := c.Push(ctx, []synckosh.Item{it})
@@ -385,13 +385,13 @@ func TestServerChecks(t *testing.T) {
 		t.Fatalf("the server dropped a field it doesn't know: %+v", p.Items[0])
 	}
 	older := it
-	older.TS--
+	older.Timestamp--
 	res, _ := c.Push(ctx, []synckosh.Item{older})
 	if res.Results[0].OK || res.Results[0].Current == nil {
 		t.Fatalf("an older version: %+v", res.Results[0])
 	}
 	future := it
-	future.TS = now + 2*24*3600*1000
+	future.Timestamp = now + 2*24*3600*1000
 	res, _ = c.Push(ctx, []synckosh.Item{future})
 	if res.Results[0].OK || res.Results[0].Error == "" {
 		t.Fatalf("a timestamp two days ahead: %+v", res.Results[0])
