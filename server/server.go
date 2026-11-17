@@ -17,7 +17,7 @@ import (
 )
 
 // Store keeps items. Every Put the server makes is one atomic write, and the server makes one
-// at a time. Items are stored as given, Seen and DeletedAt included.
+// at a time. Items are stored as given, Sequence and DeletedAt included.
 type Store interface {
 	// StoreID returns the account's store id, making one on first use.
 	StoreID(account string) (string, error)
@@ -25,10 +25,10 @@ type Store interface {
 	SetStoreID(account, id string) error
 	Get(account, bucket, guid string) (synckosh.Item, bool, error)
 	Put(account string, items []synckosh.Item) error
-	// Since returns up to limit items of a bucket with Seen greater than after, lowest first.
+	// Since returns up to limit items of a bucket with a sequence number greater than after, lowest first.
 	Since(account, bucket string, after uint64, limit int) ([]synckosh.Item, error)
-	// LastSeen returns the highest Seen ever stored, across accounts.
-	LastSeen() (uint64, error)
+	// LastSequence returns the highest sequence number ever stored, across accounts.
+	LastSequence() (uint64, error)
 	// Cleanup removes deleted items whose DeletedAt is before the given time, in milliseconds.
 	Cleanup(deletedBefore int64) (int, error)
 }
@@ -47,7 +47,7 @@ const (
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 var guidRe = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
 
-// Server serves the protocol. Writes go through one writer, which hands out Seen numbers in
+// Server serves the protocol. Writes go through one writer, which hands out sequence numbers in
 // the order they are stored.
 type Server struct {
 	store Store
@@ -56,12 +56,12 @@ type Server struct {
 	now   func() time.Time
 
 	write sync.Mutex // the one writer
-	last  uint64     // the last Seen handed out
+	last  uint64     // the last sequence number handed out
 }
 
 // New makes a server on a store.
 func New(store Store, auth Auth) (*Server, error) {
-	last, err := store.LastSeen()
+	last, err := store.LastSequence()
 	if err != nil {
 		return nil, err
 	}
@@ -128,14 +128,14 @@ func (s *Server) storeID(account string) (string, error) {
 	return s.store.StoreID(account)
 }
 
-// Result is the answer for one pushed item: stored with its Seen number, or not stored because
+// Result is the answer for one pushed item: stored with its sequence number, or not stored because
 // the server holds a version with a later timestamp, returned in Current, or refused with an
 // Error.
 type Result struct {
-	OK      bool           `json:"ok"`
-	Seen    uint64         `json:"seen,omitempty"`
-	Current *synckosh.Item `json:"current,omitempty"`
-	Error   string         `json:"error,omitempty"`
+	OK       bool           `json:"ok"`
+	Sequence uint64         `json:"sequence,omitempty"`
+	Current  *synckosh.Item `json:"current,omitempty"`
+	Error    string         `json:"error,omitempty"`
 }
 
 func (s *Server) check(raw json.RawMessage) (synckosh.Item, string) {
@@ -158,7 +158,7 @@ func (s *Server) check(raw json.RawMessage) (synckosh.Item, string) {
 	case it.Timestamp > s.now().Add(synckosh.MaxAhead).UnixMilli():
 		return it, "timestamp is more than a day ahead of the server's clock"
 	}
-	it.Seen, it.DeletedAt = 0, 0 // the server's to set
+	it.Sequence, it.DeletedAt = 0, 0 // the server's to set
 	return it, ""
 }
 
@@ -193,7 +193,7 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 	type key struct{ bucket, guid string }
 	batch := map[key]int{} // items of this push already chosen to store, by index in out
 	var out []synckosh.Item
-	seen := s.last
+	seq := s.last
 	now := s.now().UnixMilli()
 	for i, it := range in {
 		if errs[i] != "" {
@@ -214,29 +214,29 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 			continue
 		}
 		// Newer, or made in the same millisecond: the later push wins. A retry of an edit
-		// already here is stored again, which is the same edit with a new seen number.
+		// already here is stored again, which is the same edit with a new sequence number.
 		if it.Deleted {
 			it.DeletedAt = now
 			if has && cur.Deleted && cur.DeletedAt != 0 {
 				it.DeletedAt = cur.DeletedAt
 			}
 		}
-		seen++
-		it.Seen = seen
+		seq++
+		it.Sequence = seq
 		if j, ok := batch[k]; ok {
 			out[j] = it
 		} else {
 			batch[k] = len(out)
 			out = append(out, it)
 		}
-		res[i] = Result{OK: true, Seen: seen}
+		res[i] = Result{OK: true, Sequence: seq}
 	}
 	if len(out) > 0 {
 		if err := s.store.Put(account, out); err != nil {
 			internal(w, r, err)
 			return
 		}
-		s.last = seen
+		s.last = seq
 	}
 	reply(w, http.StatusOK, map[string]any{"store": id, "results": res})
 }
@@ -252,7 +252,7 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request, account string) {
 	if v := q.Get("after"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
-			fail(w, http.StatusBadRequest, "after: a seen number")
+			fail(w, http.StatusBadRequest, "after: a sequence number")
 			return
 		}
 		after = n
@@ -282,7 +282,7 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request, account string) {
 	}
 	next := after
 	if len(items) > 0 {
-		next = items[len(items)-1].Seen
+		next = items[len(items)-1].Sequence
 	}
 	if items == nil {
 		items = []synckosh.Item{}

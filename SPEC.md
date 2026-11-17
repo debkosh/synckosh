@@ -30,7 +30,7 @@ the reference: `client` for a device, `server` for the server, `bolt` for storag
   "deleted": false,
   "public": {"parent": "019a8f3c-5e1f-7a10-8b2e-1c5d0f3a9e42", "key": "password"},
   "private": {"key": "k_sUwGzUYSPw", "box": "7lg3iKfl2s0W…"},
-  "seen": 42,
+  "sequence": 42,
   "deleted_at": 1763390000000
 }
 ```
@@ -44,7 +44,7 @@ the reference: `client` for a device, `server` for the server, `bolt` for storag
 | `deleted` | device | true for a deleted item. |
 | `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |
 | `private` | device | JSON sealed with the account's data key. |
-| `seen` | server | the server's number for this version, from one counter that only goes up. |
+| `sequence` | server | the server's sequence number for this version: the order it was stored in, from one counter that only goes up. |
 | `deleted_at` | server | the server's clock, in milliseconds, when it first stored the item deleted. |
 
 Fields a reader doesn't know are kept and written back unchanged, by the server and by clients.
@@ -133,9 +133,9 @@ Up to 1000 items, each up to 1 MB, stored in one write. The server has one write
 item, in order:
 
 - **Stored** — there is no item with that guid, or the one there has the same or an earlier
-  timestamp: `{"ok": true, "seen": n}`. The server gives it the next `seen` number, and sets
+  timestamp: `{"ok": true, "sequence": n}`. The server gives it the next sequence number, and sets
   `deleted_at` if it is deleted. A retry of an edit the server already has is stored again: the
-  same edit with a new `seen`.
+  same edit with a new `sequence`.
 - **Older** — the server holds a version with a later timestamp:
   `{"ok": false, "current": {...}}`. The device takes `current`.
 - **Refused** — the item is wrong, such as a timestamp too far ahead:
@@ -143,7 +143,7 @@ item, in order:
 
 ### Pull
 
-The items of one bucket with `seen` greater than `after`, lowest first, up to `limit` (default
+The items of one bucket with `sequence` greater than `after`, lowest first, up to `limit` (default
 500, at most 1000): `{"store", "items": [...], "next": n, "more": bool}`. The device keeps
 `next` for that bucket and passes it as `after` next time.
 

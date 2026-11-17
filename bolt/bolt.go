@@ -60,7 +60,7 @@ func u64(n uint64) []byte {
 }
 
 // Store is a server.Store. Per account: "a/<account>" holds the store id, and for each sync
-// bucket "items" (guid to item) and "seen" (seen number to guid).
+// bucket "items" (guid to item) and "sequence" (sequence number to guid).
 type Store struct{ db *bbolt.DB }
 
 func OpenStore(path string) (*Store, error) {
@@ -129,7 +129,7 @@ func (s *Store) Put(account string, items []synckosh.Item) error {
 			if err != nil {
 				return err
 			}
-			bySeen, err := bk.CreateBucketIfNotExists([]byte("seen"))
+			bySeq, err := bk.CreateBucketIfNotExists([]byte("sequence"))
 			if err != nil {
 				return err
 			}
@@ -138,7 +138,7 @@ func (s *Store) Put(account string, items []synckosh.Item) error {
 				if err := json.Unmarshal(old, &o); err != nil {
 					return err
 				}
-				if err := bySeen.Delete(u64(o.Seen)); err != nil {
+				if err := bySeq.Delete(u64(o.Sequence)); err != nil {
 					return err
 				}
 			}
@@ -149,10 +149,10 @@ func (s *Store) Put(account string, items []synckosh.Item) error {
 			if err := byGUID.Put([]byte(it.GUID), v); err != nil {
 				return err
 			}
-			if err := bySeen.Put(u64(it.Seen), []byte(it.GUID)); err != nil {
+			if err := bySeq.Put(u64(it.Sequence), []byte(it.GUID)); err != nil {
 				return err
 			}
-			last = max(last, it.Seen)
+			last = max(last, it.Sequence)
 		}
 		meta, err := sub(tx, true, "meta")
 		if err != nil {
@@ -172,8 +172,8 @@ func (s *Store) Since(account, bucket string, after uint64, limit int) ([]syncko
 		if bk == nil {
 			return nil
 		}
-		byGUID, bySeen := bk.Bucket([]byte("items")), bk.Bucket([]byte("seen"))
-		c := bySeen.Cursor()
+		byGUID, bySeq := bk.Bucket([]byte("items")), bk.Bucket([]byte("sequence"))
+		c := bySeq.Cursor()
 		for k, guid := c.Seek(u64(after + 1)); k != nil && len(out) < limit; k, guid = c.Next() {
 			var it synckosh.Item
 			if err := json.Unmarshal(byGUID.Get(guid), &it); err != nil {
@@ -186,7 +186,7 @@ func (s *Store) Since(account, bucket string, after uint64, limit int) ([]syncko
 	return out, err
 }
 
-func (s *Store) LastSeen() (uint64, error) {
+func (s *Store) LastSequence() (uint64, error) {
 	var last uint64
 	err := s.db.View(func(tx *bbolt.Tx) error {
 		if meta := tx.Bucket([]byte("meta")); meta != nil {
@@ -213,7 +213,7 @@ func (s *Store) Cleanup(deletedBefore int64) (int, error) {
 			}
 			return buckets.ForEachBucket(func(name []byte) error {
 				bk := buckets.Bucket(name)
-				byGUID, bySeen := bk.Bucket([]byte("items")), bk.Bucket([]byte("seen"))
+				byGUID, bySeq := bk.Bucket([]byte("items")), bk.Bucket([]byte("sequence"))
 				var gone [][2][]byte
 				err := byGUID.ForEach(func(guid, v []byte) error {
 					var it synckosh.Item
@@ -221,7 +221,7 @@ func (s *Store) Cleanup(deletedBefore int64) (int, error) {
 						return err
 					}
 					if it.Deleted && it.DeletedAt < deletedBefore {
-						gone = append(gone, [2][]byte{bytes.Clone(guid), u64(it.Seen)})
+						gone = append(gone, [2][]byte{bytes.Clone(guid), u64(it.Sequence)})
 					}
 					return nil
 				})
@@ -232,7 +232,7 @@ func (s *Store) Cleanup(deletedBefore int64) (int, error) {
 					if err := byGUID.Delete(g[0]); err != nil {
 						return err
 					}
-					if err := bySeen.Delete(g[1]); err != nil {
+					if err := bySeq.Delete(g[1]); err != nil {
 						return err
 					}
 				}

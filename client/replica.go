@@ -90,7 +90,7 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 		if has {
 			it.Extra = old.Item.Extra
 		}
-		it.Deleted, it.Seen, it.DeletedAt = false, 0, 0
+		it.Deleted, it.Sequence, it.DeletedAt = false, 0, 0
 		its[i] = it
 	}
 	return its, r.write(its...)
@@ -106,7 +106,7 @@ func (r *Replica) Delete(bucket, guid string) error {
 		return err
 	}
 	it := e.Item
-	it.Deleted, it.Seen, it.DeletedAt = true, 0, 0
+	it.Deleted, it.Sequence, it.DeletedAt = true, 0, 0
 	return r.write(it)
 }
 
@@ -340,7 +340,7 @@ func (r *Replica) push(ctx context.Context) (restart bool, err error) {
 			switch {
 			case rs.OK:
 				e := batch[i]
-				e.Item.Seen, e.Pending = rs.Seen, false
+				e.Item.Sequence, e.Pending = rs.Sequence, false
 				es = append(es, e)
 			case rs.Current != nil:
 				// The server holds a later version: it wins, here too.

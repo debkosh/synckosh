@@ -11,7 +11,7 @@ import (
 )
 
 // Item is one synced thing. Public is plain: the server and a device that hasn't unlocked can
-// read it. Private is plain on the device and sealed on the wire. Seen and DeletedAt are set
+// read it. Private is plain on the device and sealed on the wire. Sequence and DeletedAt are set
 // by the server. Fields a later version adds are kept in Extra and written back unchanged.
 type Item struct {
 	Bucket    string
@@ -21,13 +21,13 @@ type Item struct {
 	Deleted   bool
 	Public    json.RawMessage
 	Private   json.RawMessage
-	Seen      uint64 // the server's change number for this version
+	Sequence  uint64 // the server's sequence number for this version
 	DeletedAt int64  // the server's clock, in milliseconds, when it stored the delete
 	Extra     map[string]json.RawMessage
 }
 
 var known = map[string]bool{"bucket": true, "type": true, "guid": true, "timestamp": true, "deleted": true,
-	"public": true, "private": true, "seen": true, "deleted_at": true}
+	"public": true, "private": true, "sequence": true, "deleted_at": true}
 
 func (it Item) MarshalJSON() ([]byte, error) {
 	m := make(map[string]json.RawMessage, len(it.Extra)+9)
@@ -49,8 +49,8 @@ func (it Item) MarshalJSON() ([]byte, error) {
 	if len(it.Private) > 0 {
 		m["private"] = it.Private
 	}
-	if it.Seen != 0 {
-		set("seen", it.Seen)
+	if it.Sequence != 0 {
+		set("sequence", it.Sequence)
 	}
 	if it.DeletedAt != 0 {
 		set("deleted_at", it.DeletedAt)
@@ -65,7 +65,7 @@ func (it *Item) UnmarshalJSON(b []byte) error {
 	}
 	var v Item
 	fields := map[string]any{"bucket": &v.Bucket, "type": &v.Type, "guid": &v.GUID, "timestamp": &v.Timestamp,
-		"deleted": &v.Deleted, "seen": &v.Seen, "deleted_at": &v.DeletedAt}
+		"deleted": &v.Deleted, "sequence": &v.Sequence, "deleted_at": &v.DeletedAt}
 	for k, dst := range fields {
 		if raw, ok := m[k]; ok {
 			if err := json.Unmarshal(raw, dst); err != nil {

@@ -199,7 +199,7 @@ func TestSameMillisecondLaterPushWins(t *testing.T) {
 
 	// Another device's edit, in the same millisecond as the Mac's, reaches the server last.
 	other := s
-	other.Seen = 0
+	other.Sequence = 0
 	other.Private = json.RawMessage(`{"value":"light"}`)
 	sealed, err := e.key.Seal(other)
 	if err != nil {
@@ -378,8 +378,8 @@ func TestServerChecks(t *testing.T) {
 		}
 	}
 	p, _ := c.Pull(ctx, "settings", 0)
-	if len(p.Items) != 1 || p.Items[0].Seen != 2 {
-		t.Fatalf("a retried push: want one item, stored again as seen 2: %+v", p)
+	if len(p.Items) != 1 || p.Items[0].Sequence != 2 {
+		t.Fatalf("a retried push: want one item, stored again as sequence 2: %+v", p)
 	}
 	if string(p.Items[0].Extra["later"]) != `{"x":1}` {
 		t.Fatalf("the server dropped a field it doesn't know: %+v", p.Items[0])

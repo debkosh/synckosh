@@ -25,10 +25,10 @@ type Client struct {
 
 // Result is the server's answer for one pushed item.
 type Result struct {
-	OK      bool           `json:"ok"`
-	Seen    uint64         `json:"seen,omitempty"`
-	Current *synckosh.Item `json:"current,omitempty"`
-	Error   string         `json:"error,omitempty"`
+	OK       bool           `json:"ok"`
+	Sequence uint64         `json:"sequence,omitempty"`
+	Current  *synckosh.Item `json:"current,omitempty"`
+	Error    string         `json:"error,omitempty"`
 }
 
 // Pushed is the server's answer to a push.
@@ -57,7 +57,7 @@ func (c *Client) Push(ctx context.Context, items []synckosh.Item) (Pushed, error
 	return p, nil
 }
 
-// Pull returns a bucket's items the server stored after the Seen number after.
+// Pull returns a bucket's items the server stored after the sequence number after.
 func (c *Client) Pull(ctx context.Context, bucket string, after uint64) (Page, error) {
 	q := url.Values{"bucket": {bucket}, "after": {strconv.FormatUint(after, 10)}}
 	var p Page
