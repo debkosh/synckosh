@@ -7,8 +7,8 @@ the reference: `client` for a device, `server` for the server, `bolt` for storag
 
 - **Everything is an item.** An item has a bucket, a type, a guid, a timestamp, a deleted flag,
   a public part and a private part.
-- **For each guid, the item with the newest timestamp wins.** That is all the server does with
-  items. It never opens a private part.
+- **For each guid, the item with the newest timestamp wins;** in the same millisecond, the one
+  the server stored last. That is all the server does with items. It never opens a private part.
 - **Items know their parent; sync knows only items.** An item may name a parent in its public
   part. Sync never follows it. Lists, objects and trees are built by the client from the items
   that name a parent.
@@ -26,7 +26,7 @@ the reference: `client` for a device, `server` for the server, `bolt` for storag
   "bucket": "logins",
   "type": "login-field",
   "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d07",
-  "ts": [1763380800000, 0, "mac"],
+  "ts": 1763380800000,
   "deleted": false,
   "public": {"parent": "019a8f3c-5e1f-7a10-8b2e-1c5d0f3a9e42", "key": "password"},
   "private": {"key": "k_sUwGzUYSPw", "box": "7lg3iKfl2s0W…"},
@@ -40,7 +40,7 @@ the reference: `client` for a device, `server` for the server, `bolt` for storag
 | `bucket` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of buckets only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64. |
 | `type` | device | what the item is, for the client: `folder`, `bookmark`, `login`, `login-field`. Same characters. |
 | `guid` | device | a UUIDv7 for a new item ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), so guids sort by when they were made. An edit keeps the guid. Letters, digits, `._:~-`, up to 128. |
-| `ts` | device | when the edit was made: `[ms, n, device]`. |
+| `ts` | device | when the edit was made: the device's clock, in milliseconds. |
 | `deleted` | device | true for a deleted item. |
 | `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |
 | `private` | device | JSON sealed with the account's data key. |
@@ -51,12 +51,19 @@ Fields a reader doesn't know are kept and written back unchanged, by the server 
 
 ### Timestamps
 
-`[ms, n, device]` compares by `ms`, then `n`, then `device`. A device's timestamps:
-- never go below one it has made or read, counting up `n` when its clock hasn't moved past
-  the newest it has seen;
+A timestamp is a plain number of milliseconds. A device's timestamps:
+- are always after every one it has made or read: its clock, or one millisecond past the newest
+  it has seen when its clock is behind;
 - don't follow a timestamp more than a day ahead of its own clock.
 
+All the items of one write get one timestamp, so writing many items doesn't move the clock ahead.
 The server refuses items more than a day ahead of its own clock.
+
+Two devices that haven't seen each other's edit can make them in the same millisecond. Then the
+one the server stores last wins: the server stores an edit unless it holds one with a later
+timestamp, and a device takes what it pulls unless its own version has a later timestamp. Every
+device pulls the server's copy, so they all end up with the same one. Nothing depends on which
+device made an edit.
 
 ### Public and private parts
 
@@ -125,13 +132,12 @@ Every answer to push and pull carries `store`: the account's store id.
 Up to 1000 items, each up to 1 MB, stored in one write. The server has one writer. For each
 item, in order:
 
-- **Stored** — there is no item with that guid, or the one there is older:
-  `{"ok": true, "seen": n}`. The server gives it the next `seen` number, and sets `deleted_at`
-  if it is deleted.
-- **A retry** — the server holds an item with the same `ts`. A timestamp names one edit, so this
-  is a success: `{"ok": true, "seen": n}`.
-- **Older** — the server holds a newer version: `{"ok": false, "current": {...}}`. The device
-  takes `current`.
+- **Stored** — there is no item with that guid, or the one there has the same or an earlier
+  timestamp: `{"ok": true, "seen": n}`. The server gives it the next `seen` number, and sets
+  `deleted_at` if it is deleted. A retry of an edit the server already has is stored again: the
+  same edit with a new `seen`.
+- **Older** — the server holds a version with a later timestamp:
+  `{"ok": false, "current": {...}}`. The device takes `current`.
 - **Refused** — the item is wrong, such as a timestamp too far ahead:
   `{"ok": false, "error": "..."}`.
 
@@ -159,7 +165,8 @@ than that may keep items that were deleted meanwhile.
 
 ## A device's sync
 
-1. Pull each bucket from its `next`. Take each item, unless this device has a newer version.
+1. Pull each bucket from its `next`. Take each item, unless this device's version has a later
+   timestamp.
 2. If the store id changed, mark everything pending and start again from the beginning.
 3. Push everything changed here. For each `current` that comes back, take it.
 4. Keep the clock, the store id and each bucket's `next`.
@@ -168,5 +175,4 @@ than that may keep items that were deleted meanwhile.
 
 - New buckets and types need no change to the server.
 - Fields a reader doesn't know are kept and written back.
-- `ts` may gain elements after the third; readers ignore them.
 - A change that would break a version 1 client is version 2, under `/v2`.

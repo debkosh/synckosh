@@ -7,7 +7,7 @@ private part of every item is sealed with a key that only the user's passphrases
 
 - **One shape:** an item has a bucket, a type, a guid, a timestamp, a deleted flag, a public part
   and a private part.
-- **One rule:** for each guid, the newest timestamp wins.
+- **One rule:** for each guid, the latest timestamp wins; in the same millisecond, the later push.
 - **Items, not relationships:** an item names its parent. Lists, objects and trees are built on
   the device; an item whose parent is gone is an orphan, never deleted.
 - **The devices hold the real copy:** if the server loses data, it changes its store id and the
@@ -33,7 +33,6 @@ r, _ := client.Open(client.Config{
 	Client:  &client.Client{URL: "https://sync.example.com", HTTP: signedInHTTPClient},
 	Local:   local,
 	Key:     key,
-	Device:  "mac",
 	Buckets: []string{"keys", "bookmarks"},
 })
 
@@ -65,7 +64,7 @@ go test ./...
 ```
 
 They sync devices through a real server and bbolt files: newest wins whichever device pushes
-first; a login whose fields and passwords are items keeps both devices' edits; the server's file
+first, and the later push in the same millisecond; a login whose fields and passwords are items keeps both devices' edits; the server's file
 never holds a private part in the clear; a new store id refills the server, with a new device
 getting the data as it comes back; 2,500 items page without loss; clearing a bucket; reopening a
 device; retries, old versions, timestamps too far ahead and other accounts; cleanup; and joining

@@ -129,7 +129,8 @@ func (s *Server) storeID(account string) (string, error) {
 }
 
 // Result is the answer for one pushed item: stored with its Seen number, or not stored because
-// the server holds a newer version, returned in Current, or refused with an Error.
+// the server holds a version with a later timestamp, returned in Current, or refused with an
+// Error.
 type Result struct {
 	OK      bool           `json:"ok"`
 	Seen    uint64         `json:"seen,omitempty"`
@@ -152,9 +153,9 @@ func (s *Server) check(raw json.RawMessage) (synckosh.Item, string) {
 		return it, "type: lowercase letters, digits, dot, dash or underscore, up to 64"
 	case !guidRe.MatchString(it.GUID):
 		return it, "guid: letters, digits and ._:~- up to 128"
-	case it.TS.MS <= 0 || it.TS.N < 0 || it.TS.Dev == "":
-		return it, "ts: [ms, n, device]"
-	case it.TS.MS > s.now().Add(synckosh.MaxAhead).UnixMilli():
+	case it.TS <= 0:
+		return it, "ts: the time of the edit, in milliseconds"
+	case it.TS > s.now().Add(synckosh.MaxAhead).UnixMilli():
 		return it, "ts is more than a day ahead of the server's clock"
 	}
 	it.Seen, it.DeletedAt = 0, 0 // the server's to set
@@ -207,15 +208,13 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 			internal(w, r, err)
 			return
 		}
-		switch {
-		case has && cur.TS == it.TS:
-			res[i] = Result{OK: true, Seen: cur.Seen} // the same edit again: a retry
-			continue
-		case has && !it.TS.After(cur.TS):
+		if has && it.TS < cur.TS {
 			c := cur
 			res[i] = Result{Current: &c}
 			continue
 		}
+		// Newer, or made in the same millisecond: the later push wins. A retry of an edit
+		// already here is stored again, which is the same edit with a new seen number.
 		if it.Deleted {
 			it.DeletedAt = now
 			if has && cur.Deleted && cur.DeletedAt != 0 {

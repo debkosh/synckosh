@@ -10,47 +10,41 @@ import (
 // clock along, and the server refuses items that far ahead.
 const MaxAhead = 24 * time.Hour
 
-// Clock makes timestamps that never go below one this device has written or read, so an edit
-// made after seeing another always sorts after it, whatever the wall clock says.
+// Clock makes timestamps, in milliseconds, that are always after every one this device has
+// made or read, so an edit made after seeing another always wins over it, whatever the wall
+// clock says.
 type Clock struct {
 	mu   sync.Mutex
-	dev  string
-	last TS
+	last int64
 	now  func() time.Time
 }
 
-func NewClock(device string) *Clock {
-	return &Clock{dev: device, now: time.Now}
+func NewClock() *Clock {
+	return &Clock{now: time.Now}
 }
 
-// Now returns a timestamp newer than every one this clock has made or observed.
-func (c *Clock) Now() TS {
+// Now returns a timestamp after every one this clock has made or observed: the wall clock, or
+// one millisecond past the newest it has seen when the wall clock is behind it.
+func (c *Clock) Now() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ms := c.now().UnixMilli()
-	if ms > c.last.MS {
-		c.last = TS{MS: ms, Dev: c.dev}
-	} else {
-		c.last = TS{MS: c.last.MS, N: c.last.N + 1, Dev: c.dev}
-	}
+	c.last = max(c.now().UnixMilli(), c.last+1)
 	return c.last
 }
 
-// Observe moves the clock past a timestamp read from another device.
-func (c *Clock) Observe(t TS) {
+// Observe moves the clock up to a timestamp read from another device, unless that timestamp
+// is more than MaxAhead ahead of this device's clock.
+func (c *Clock) Observe(t int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if t.MS > c.now().Add(MaxAhead).UnixMilli() {
-		return
-	}
-	if t.MS > c.last.MS || (t.MS == c.last.MS && t.N > c.last.N) {
-		c.last = TS{MS: t.MS, N: t.N, Dev: c.dev}
+	if t <= c.now().Add(MaxAhead).UnixMilli() {
+		c.last = max(c.last, t)
 	}
 }
 
 // Last returns the newest timestamp this clock has made or observed, for the device to keep
 // so the clock never goes back after a restart.
-func (c *Clock) Last() TS {
+func (c *Clock) Last() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.last

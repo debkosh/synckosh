@@ -9,59 +9,42 @@ import (
 )
 
 func TestItemKeepsFieldsItDoesNotKnow(t *testing.T) {
-	in := `{"bucket":"bookmarks","type":"bookmark","guid":"g1","ts":[5,1,"mac",9],"deleted":false,"public":{"parent":"f1"},"private":{"key":"k","box":"x"},"seen":7,"deleted_at":0,"later":2}`
+	in := `{"bucket":"bookmarks","type":"bookmark","guid":"g1","ts":5,"deleted":false,"public":{"parent":"f1"},"private":{"key":"k","box":"x"},"seen":7,"deleted_at":0,"later":2}`
 	var it Item
 	if err := json.Unmarshal([]byte(in), &it); err != nil {
 		t.Fatal(err)
 	}
-	if it.TS != (TS{5, 1, "mac"}) || it.Seen != 7 || string(it.Extra["later"]) != "2" || string(it.Public) != `{"parent":"f1"}` {
+	if it.TS != 5 || it.Seen != 7 || string(it.Extra["later"]) != "2" || string(it.Public) != `{"parent":"f1"}` {
 		t.Fatalf("read %+v", it)
 	}
 	out, err := json.Marshal(it)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"bucket":"bookmarks","deleted":false,"guid":"g1","later":2,"private":{"key":"k","box":"x"},"public":{"parent":"f1"},"seen":7,"ts":[5,1,"mac"],"type":"bookmark"}`
+	want := `{"bucket":"bookmarks","deleted":false,"guid":"g1","later":2,"private":{"key":"k","box":"x"},"public":{"parent":"f1"},"seen":7,"ts":5,"type":"bookmark"}`
 	if string(out) != want {
 		t.Fatalf("wrote\n%s\nwant\n%s", out, want)
 	}
 }
 
-func TestTSOrder(t *testing.T) {
-	cases := []struct {
-		a, b TS
-		want bool
-	}{
-		{TS{2, 0, "a"}, TS{1, 9, "z"}, true},
-		{TS{1, 2, "a"}, TS{1, 1, "z"}, true},
-		{TS{1, 1, "b"}, TS{1, 1, "a"}, true},
-		{TS{1, 1, "a"}, TS{1, 1, "a"}, false},
-	}
-	for _, c := range cases {
-		if got := c.a.After(c.b); got != c.want {
-			t.Errorf("%v after %v = %v", c.a, c.b, got)
-		}
-	}
-}
-
 func TestClockNeverGoesBack(t *testing.T) {
 	now := time.UnixMilli(1000)
-	c := NewClock("phone")
+	c := NewClock()
 	c.now = func() time.Time { return now }
 	a := c.Now()
 	b := c.Now()
-	if !b.After(a) {
+	if b <= a {
 		t.Fatalf("%v then %v", a, b)
 	}
 	// The laptop's clock is a minute ahead; an edit here after seeing its item still wins.
-	seen := TS{MS: 61000, N: 3, Dev: "laptop"}
+	seen := int64(61000)
 	c.Observe(seen)
-	if e := c.Now(); !e.After(seen) {
+	if e := c.Now(); e <= seen {
 		t.Fatalf("edit %v after seeing %v", e, seen)
 	}
 	// A clock a year ahead doesn't drag this one along.
-	c.Observe(TS{MS: now.Add(365 * 24 * time.Hour).UnixMilli(), Dev: "broken"})
-	if e := c.Now(); e.MS > now.Add(MaxAhead).UnixMilli() {
+	c.Observe(now.Add(365 * 24 * time.Hour).UnixMilli())
+	if e := c.Now(); e > now.Add(MaxAhead).UnixMilli() {
 		t.Fatalf("followed a clock a year ahead: %v", e)
 	}
 }
@@ -71,7 +54,7 @@ func TestSealBindsTheItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	it := Item{Bucket: "logins", Type: "login-field", GUID: "g1", TS: TS{1, 0, "mac"},
+	it := Item{Bucket: "logins", Type: "login-field", GUID: "g1", TS: 1,
 		Public: json.RawMessage(`{"parent":"l1","key":"password"}`), Private: json.RawMessage(`{"value":"hunter2"}`)}
 	s, err := k.Seal(it)
 	if err != nil {
@@ -86,7 +69,7 @@ func TestSealBindsTheItem(t *testing.T) {
 	}
 	for name, change := range map[string]func(*Item){
 		"guid":    func(i *Item) { i.GUID = "g2" },
-		"ts":      func(i *Item) { i.TS = TS{2, 0, "mac"} },
+		"ts":      func(i *Item) { i.TS = 2 },
 		"public":  func(i *Item) { i.Public = json.RawMessage(`{"parent":"l2","key":"password"}`) },
 		"deleted": func(i *Item) { i.Deleted = true },
 	} {

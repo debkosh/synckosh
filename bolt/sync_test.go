@@ -78,7 +78,7 @@ func (e *env) device(name string, buckets ...string) *device {
 	e.t.Cleanup(func() { local.Close() })
 	r, err := client.Open(client.Config{
 		Client: &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}},
-		Local:  local, Key: e.key, Device: name, Buckets: buckets,
+		Local:  local, Key: e.key, Buckets: buckets,
 	})
 	if err != nil {
 		e.t.Fatal(err)
@@ -188,6 +188,38 @@ func TestNewestWins(t *testing.T) {
 
 // A login is items: the login, its fields, and each value of its password as its own item,
 // never an edit, so two devices changing it at once both keep theirs.
+// Two devices that haven't seen each other's edit can stamp them in the same millisecond. The
+// later push wins on the server, and every device takes the server's copy.
+func TestSameMillisecondLaterPushWins(t *testing.T) {
+	e := newEnv(t)
+	mac, phone := e.device("mac", "settings"), e.device("phone", "settings")
+	s := put(t, mac, synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme",
+		Public: json.RawMessage(`{"key":"theme"}`), Private: json.RawMessage(`{"value":"dark"}`)})
+	sync(t, mac, phone)
+
+	// Another device's edit, in the same millisecond as the Mac's, reaches the server last.
+	other := s
+	other.Seen = 0
+	other.Private = json.RawMessage(`{"value":"light"}`)
+	sealed, err := e.key.Seal(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
+	res, err := c.Push(context.Background(), []synckosh.Item{sealed})
+	if err != nil || !res.Results[0].OK {
+		t.Fatalf("a push in the same millisecond: %v %+v", err, res)
+	}
+
+	sync(t, mac, phone)
+	for _, d := range []*device{mac, phone} {
+		it, _, _ := d.Get("settings", s.GUID)
+		if it.TS != s.TS || private(t, it)["value"] != "light" {
+			t.Fatalf("%s kept %s, want the later push", d.name, it.Private)
+		}
+	}
+}
+
 func TestLoginAsItems(t *testing.T) {
 	e := newEnv(t)
 	mac, phone := e.device("mac", "logins"), e.device("phone", "logins")
@@ -265,7 +297,7 @@ func TestNewStoreIDRefills(t *testing.T) {
 	t.Cleanup(ts.Close)
 	for _, d := range []*device{mac, phone} {
 		d.Replica, _ = client.Open(client.Config{Client: &client.Client{URL: ts.URL, HTTP: &http.Client{Transport: signedIn{"me"}}},
-			Local: d.local, Key: e.key, Device: d.name, Buckets: []string{"bookmarks"}})
+			Local: d.local, Key: e.key, Buckets: []string{"bookmarks"}})
 	}
 	e.url = ts.URL
 	tablet := e.device("tablet", "bookmarks")
@@ -320,14 +352,14 @@ func TestReopenKeepsEverything(t *testing.T) {
 	mac := e.device("mac", "bookmarks")
 	b := put(t, mac, bookmark("root", "Go"))
 	mac.Replica, _ = client.Open(client.Config{Client: &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}},
-		Local: mac.local, Key: e.key, Device: "mac", Buckets: []string{"bookmarks"}})
+		Local: mac.local, Key: e.key, Buckets: []string{"bookmarks"}})
 	sync(t, mac) // the edit made before reopening is still pending, and goes out
 	it, has, _ := e.store.Get("me", "bookmarks", b.GUID)
 	if !has || it.TS != b.TS {
 		t.Fatalf("after reopening: %v %+v", has, it)
 	}
 	b2 := put(t, mac, bookmark("root", "Go docs"))
-	if !b2.TS.After(b.TS) {
+	if b2.TS <= b.TS {
 		t.Fatalf("the clock went back after reopening: %v then %v", b.TS, b2.TS)
 	}
 }
@@ -337,7 +369,7 @@ func TestServerChecks(t *testing.T) {
 	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
 	ctx := context.Background()
 	now := time.Now().UnixMilli()
-	it := synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme", TS: synckosh.TS{MS: now, Dev: "mac"},
+	it := synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme", TS: now,
 		Extra: map[string]json.RawMessage{"later": json.RawMessage(`{"x":1}`)}}
 	for i := 0; i < 2; i++ {
 		res, err := c.Push(ctx, []synckosh.Item{it})
@@ -346,20 +378,20 @@ func TestServerChecks(t *testing.T) {
 		}
 	}
 	p, _ := c.Pull(ctx, "settings", 0)
-	if len(p.Items) != 1 || p.Items[0].Seen != 1 {
-		t.Fatalf("a retried push stored twice: %+v", p)
+	if len(p.Items) != 1 || p.Items[0].Seen != 2 {
+		t.Fatalf("a retried push: want one item, stored again as seen 2: %+v", p)
 	}
 	if string(p.Items[0].Extra["later"]) != `{"x":1}` {
 		t.Fatalf("the server dropped a field it doesn't know: %+v", p.Items[0])
 	}
 	older := it
-	older.TS.MS--
+	older.TS--
 	res, _ := c.Push(ctx, []synckosh.Item{older})
 	if res.Results[0].OK || res.Results[0].Current == nil {
 		t.Fatalf("an older version: %+v", res.Results[0])
 	}
 	future := it
-	future.TS.MS = now + 2*24*3600*1000
+	future.TS = now + 2*24*3600*1000
 	res, _ = c.Push(ctx, []synckosh.Item{future})
 	if res.Results[0].OK || res.Results[0].Error == "" {
 		t.Fatalf("a timestamp two days ahead: %+v", res.Results[0])
@@ -419,7 +451,7 @@ func TestJoinWithPassphrase(t *testing.T) {
 	}
 	local, _ := OpenLocal(filepath.Join(e.dir, "new.db"))
 	defer local.Close()
-	r, _ := client.Open(client.Config{Client: c, Local: local, Key: key, Device: "new", Buckets: []string{"keys", "bookmarks"}})
+	r, _ := client.Open(client.Config{Client: c, Local: local, Key: key, Buckets: []string{"keys", "bookmarks"}})
 	if err := r.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}

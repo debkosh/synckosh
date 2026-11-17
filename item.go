@@ -10,54 +10,6 @@ import (
 	"sort"
 )
 
-// TS is when an edit was made: the device's clock in milliseconds, a counter, and the device.
-// On the wire it is [ms, n, "device"].
-type TS struct {
-	MS  int64
-	N   int64
-	Dev string
-}
-
-// After reports whether t is newer than u.
-func (t TS) After(u TS) bool {
-	if t.MS != u.MS {
-		return t.MS > u.MS
-	}
-	if t.N != u.N {
-		return t.N > u.N
-	}
-	return t.Dev > u.Dev
-}
-
-func (t TS) IsZero() bool { return t == TS{} }
-
-func (t TS) MarshalJSON() ([]byte, error) {
-	return json.Marshal([]any{t.MS, t.N, t.Dev})
-}
-
-// UnmarshalJSON reads [ms, n, "device"]. Elements a later version adds are ignored.
-func (t *TS) UnmarshalJSON(b []byte) error {
-	var a []json.RawMessage
-	if err := json.Unmarshal(b, &a); err != nil {
-		return fmt.Errorf("ts: %w", err)
-	}
-	if len(a) < 3 {
-		return fmt.Errorf("ts: want [ms, n, device], got %s", b)
-	}
-	var v TS
-	if err := json.Unmarshal(a[0], &v.MS); err != nil {
-		return fmt.Errorf("ts ms: %w", err)
-	}
-	if err := json.Unmarshal(a[1], &v.N); err != nil {
-		return fmt.Errorf("ts n: %w", err)
-	}
-	if err := json.Unmarshal(a[2], &v.Dev); err != nil {
-		return fmt.Errorf("ts device: %w", err)
-	}
-	*t = v
-	return nil
-}
-
 // Item is one synced thing. Public is plain: the server and a device that hasn't unlocked can
 // read it. Private is plain on the device and sealed on the wire. Seen and DeletedAt are set
 // by the server. Fields a later version adds are kept in Extra and written back unchanged.
@@ -65,7 +17,7 @@ type Item struct {
 	Bucket    string
 	Type      string
 	GUID      string
-	TS        TS
+	TS        int64 // when the edit was made, the device's clock in milliseconds
 	Deleted   bool
 	Public    json.RawMessage
 	Private   json.RawMessage

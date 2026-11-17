@@ -37,7 +37,6 @@ type Config struct {
 	Client  *Client
 	Local   Local
 	Key     *synckosh.DataKey
-	Device  string   // this device's id, in every timestamp it makes
 	Buckets []string // the buckets this device syncs
 }
 
@@ -54,14 +53,14 @@ type Replica struct {
 
 // Open opens a device's replica, with its clock where it left off.
 func Open(cfg Config) (*Replica, error) {
-	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, clock: synckosh.NewClock(cfg.Device),
+	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, clock: synckosh.NewClock(),
 		bkts: append([]string(nil), cfg.Buckets...)}
 	b, err := r.local.Meta("clock")
 	if err != nil {
 		return nil, err
 	}
 	if b != nil {
-		var last synckosh.TS
+		var last int64
 		if err := json.Unmarshal(b, &last); err != nil {
 			return nil, fmt.Errorf("clock: %w", err)
 		}
@@ -118,10 +117,13 @@ func (r *Replica) Clear(bucket string) error {
 	return r.write(synckosh.Item{Bucket: bucket, Type: ClearType, GUID: synckosh.NewGUID()})
 }
 
+// write stores edits made here, all with one timestamp, so a write of many items doesn't move
+// the clock ahead of the wall clock.
 func (r *Replica) write(its ...synckosh.Item) error {
+	ts := r.clock.Now()
 	es := make([]Entry, len(its))
 	for i := range its {
-		its[i].TS = r.clock.Now()
+		its[i].TS = ts
 		es[i] = Entry{Item: its[i], Pending: true}
 	}
 	if err := r.local.Put(es...); err != nil {
@@ -143,12 +145,10 @@ func (r *Replica) Items(bucket string) ([]synckosh.Item, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var all []synckosh.Item
-	var cleared synckosh.TS
+	var cleared int64
 	err := r.local.Each(bucket, func(e Entry) error {
 		if e.Item.Type == ClearType {
-			if e.Item.TS.After(cleared) {
-				cleared = e.Item.TS
-			}
+			cleared = max(cleared, e.Item.TS)
 			return nil
 		}
 		all = append(all, e.Item)
@@ -159,7 +159,7 @@ func (r *Replica) Items(bucket string) ([]synckosh.Item, error) {
 	}
 	out := all[:0]
 	for _, it := range all {
-		if !it.Deleted && it.TS.After(cleared) {
+		if !it.Deleted && it.TS > cleared {
 			out = append(out, it)
 		}
 	}
@@ -285,8 +285,9 @@ func (r *Replica) pull(ctx context.Context, bucket string) (restart bool, err er
 	}
 }
 
-// take returns the entry to store for an item from the server, unless this device has a newer
-// version of it.
+// take returns the entry to store for an item from the server, unless this device has a version
+// with a later timestamp. One made in the same millisecond is taken: the server's copy is the
+// one pushed last, and every device ends up with it.
 func (r *Replica) take(remote synckosh.Item) (Entry, bool, error) {
 	remote, err := r.key.Open(remote)
 	if err != nil {
@@ -297,8 +298,8 @@ func (r *Replica) take(remote synckosh.Item) (Entry, bool, error) {
 	if err != nil {
 		return Entry{}, false, err
 	}
-	if has && e.Item.TS.After(remote.TS) {
-		return Entry{}, false, nil // this device's version is newer, and is pushed
+	if has && e.Item.TS > remote.TS {
+		return Entry{}, false, nil // this device's version is later, and is pushed
 	}
 	return Entry{Item: remote}, true, nil
 }
@@ -312,7 +313,7 @@ func (r *Replica) push(ctx context.Context) (restart bool, err error) {
 		}
 		pending = append(pending, p...)
 	}
-	sort.Slice(pending, func(i, j int) bool { return pending[j].Item.TS.After(pending[i].Item.TS) })
+	sort.Slice(pending, func(i, j int) bool { return pending[i].Item.TS < pending[j].Item.TS })
 	for len(pending) > 0 {
 		n := min(len(pending), 1000)
 		batch := pending[:n]
@@ -342,7 +343,7 @@ func (r *Replica) push(ctx context.Context) (restart bool, err error) {
 				e.Item.Seen, e.Pending = rs.Seen, false
 				es = append(es, e)
 			case rs.Current != nil:
-				// The server holds a newer version: it wins, here too.
+				// The server holds a later version: it wins, here too.
 				e, ok, err := r.take(*rs.Current)
 				if err != nil {
 					return false, err
