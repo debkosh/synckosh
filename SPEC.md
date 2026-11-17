@@ -40,9 +40,9 @@ Three levels name where an item lives:
 
 | Field | Set by | What it is |
 |---|---|---|
-| `collection` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of collections only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64. |
+| `collection` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of collections only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64, starting with a letter or digit. |
 | `datatype` | device | what the item is, for the app: `folder`, `bookmark`, `todo`. Same characters. |
-| `guid` | device | a UUIDv7 for a new item ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), so guids sort by when they were made. An edit keeps the guid. Letters, digits, `._:~-`, up to 128. |
+| `guid` | device | a UUIDv7 for a new item ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), so guids sort by when they were made. An edit keeps the guid. Letters, digits, `._:~-`, up to 128, not starting with `_`. |
 | `timestamp` | device | when the edit was made: the device's clock, in milliseconds. |
 | `deleted` | device | true for a deleted item. |
 | `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |
@@ -51,6 +51,13 @@ Three levels name where an item lives:
 | `deleted_at` | server | the server's clock, in milliseconds, when it first stored the item deleted. |
 
 Fields a reader doesn't know are kept and written back unchanged, by the server and by clients.
+
+### Reserved names
+
+Names that start with `_` belong to the protocol; an app's names can't start with one. The
+collection `_sealedkeys` holds the data key's sealed copies, of datatype `_sealedkey`, and
+nothing else. A server refuses, and a device neither writes nor takes, an item whose names break
+these rules.
 
 ### Timestamps
 
@@ -107,11 +114,11 @@ Clearing history is one such item, not one delete per visit.
   no copy on screen. Anything a person sees, writes down or scans, such as a backup code or a QR
   code to join a device, is a random passphrase with its own sealed copy, so it can be removed on
   its own.
-- **Each passphrase seals its own copy** of the data key, as an item in the `keys` collection, datatype
-  `sealed-key`. Its public part holds what a new device needs: the label, the data key's id, and
+- **Each passphrase seals its own copy** of the data key, as an item in the `_sealedkeys` collection, datatype
+  `_sealedkey`. Its public part holds what a new device needs: the label, the data key's id, and
   the Argon2id settings and salt. Its private part is the data key sealed with XChaCha20-Poly1305
   under the passphrase's Argon2id key, with the data key's id as additional data.
-- **Joining a device:** it pulls the `keys` collection, asks for a passphrase, opens a copy, and keeps
+- **Joining a device:** it pulls the `_sealedkeys` collection, asks for a passphrase, opens a copy, and keeps
   the data key.
 - **Adding, changing or removing a passphrase** is putting, editing or deleting its copy.
 - **Changing the data key** after a leak means sealing every item again under a new key, as
@@ -127,13 +134,13 @@ belongs to, and every bucket's items are apart.
 |---|---|
 | `GET /v1` | `{"version": 1}` |
 | `POST /v1/push` `{"items": [...]}` | push, below |
-| `GET /v1/pull?after=&limit=&collection=` | pull, below |
+| `GET /v1/pull?after=&collection=` | pull, below |
 
 Every answer to push and pull carries `store`: the bucket's store id.
 
 ### Push
 
-Up to 1000 items, each up to 1 MB, stored in one write. The server has one writer, so the items
+As many items as the server's limits allow, stored in one write. The server has one writer, so the items
 of one push get sequence numbers that run on with no gaps, and the next push gets the numbers
 after them. Each bucket has its own counter. For each item, in order:
 
@@ -144,8 +151,8 @@ after them. Each bucket has its own counter. For each item, in order:
 - **Older** — the server holds a version with a later timestamp:
   `{"ok": false, "current": {...}}`. The device takes `current`.
 - **Refused** — the item is wrong: `{"ok": false, "code": "...", "error": "..."}`. The code is
-  `timestamp-ahead` (more than a day ahead of the server's clock), `too-big` or `invalid`; the
-  error says what, for a person.
+  `timestamp-ahead` (more than a day ahead of the server's clock), `too-big` (over the server's
+  item limit) or `invalid`; the error says what, for a person.
 
 The answer is `{"store", "time", "results": [...]}`, with one result per item in the order sent.
 `time` is the server's clock in milliseconds, so a device refused for `timestamp-ahead` can say
@@ -153,11 +160,11 @@ by how much its clock is wrong.
 
 ### Pull
 
-The bucket's items with `sequence` greater than `after`, of every collection, lowest first, up to
-`limit` (default 500, at most 1000): `{"store", "items": [...], "next": n, "more": bool}`. The
+The bucket's items with `sequence` greater than `after`, of every collection, lowest first, a page
+at a time: `{"store", "items": [...], "next": n, "more": bool}`. The
 device keeps `next` and passes it as `after` next time. A collection another device starts using
 just shows up. `collection=` limits a pull to one collection, for a device joining with a passphrase that
-reads only `keys` first.
+reads only `_sealedkeys` first.
 
 The pull goes by when the server stored an item, not by when it was made, so an old item pushed
 back later still reaches every device.
@@ -169,6 +176,18 @@ may have lost any of that bucket's data: a wipe, a restore from a backup, a move
 A device that sees a store id it didn't sync with last pushes everything it has, live and
 deleted, with the timestamps they were made with, and reads every collection from the start. Newest
 wins settles the rest. A new device meanwhile gets what is there, then the rest as it arrives.
+
+### Limits
+
+Each side sets its own limits. The defaults:
+
+| Limit | Default |
+|---|---|
+| one item, as sealed JSON on the wire | 1 MiB |
+| items in one push | 1000 |
+| bytes in one push request | 16 MiB |
+
+A device refuses an edit over its own item limit when it is made, rather than leave it pending.
 
 ### Cleanup
 

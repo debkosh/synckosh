@@ -133,14 +133,3 @@ func bound(it Item) []byte {
 	b, _ := json.Marshal([]any{it.Collection, it.Datatype, it.GUID, it.Timestamp, it.Deleted, json.RawMessage(pub.Bytes())})
 	return b
 }
-
-// Why the server refused a pushed item, in a push result's "code".
-const (
-	// RefusedTimestampAhead: the item's timestamp is more than MaxAhead ahead of the server's
-	// clock, so the device's clock is wrong.
-	RefusedTimestampAhead = "timestamp-ahead"
-	// RefusedTooBig: the item is over 1 MB.
-	RefusedTooBig = "too-big"
-	// RefusedInvalid: a field is malformed, such as a collection name with capitals.
-	RefusedInvalid = "invalid"
-)

@@ -49,7 +49,7 @@ r.Sync(ctx)
 
 ```go
 store, _ := bolt.OpenStore("server.db")
-srv, _ := server.New(store, func(r *http.Request) (string, error) {
+srv := server.New(store, func(r *http.Request) (string, error) {
 	return bucketFromYourSignIn(r) // the bucket this request may use
 })
 http.ListenAndServe(":8484", srv)

@@ -7,9 +7,9 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
 	"sync"
 	"time"
@@ -38,20 +38,15 @@ type Store interface {
 // Auth tells the server which bucket a request is for. It returns an error to refuse it.
 type Auth func(r *http.Request) (bucket string, err error)
 
-const (
-	maxRequest  = 16 << 20 // bytes in one request
-	maxItem     = 1 << 20  // bytes in one item
-	MaxPush     = 1000     // items in one push, stored in one write
-	pageSize    = 500
-	maxPageSize = 1000
-)
-
-var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-var guidRe = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
+// pageSize is the most items one pull answer holds.
+const pageSize = 500
 
 // Server serves the protocol. Writes go through one writer, which hands out each bucket's
 // sequence numbers in the order its items are stored, with no gaps within one push.
 type Server struct {
+	// Limits are this server's; zero fields take synckosh.DefaultLimits. Set them before serving.
+	Limits synckosh.Limits
+
 	store Store
 	auth  Auth
 	mux   *http.ServeMux
@@ -61,16 +56,16 @@ type Server struct {
 }
 
 // New makes a server on a store.
-func New(store Store, auth Auth) (*Server, error) {
+func New(store Store, auth Auth) *Server {
 	s := &Server{store: store, auth: auth, mux: http.NewServeMux(), now: time.Now}
 	s.mux.HandleFunc("GET /v1", s.info)
 	s.mux.HandleFunc("POST /v1/push", s.authed(s.push))
 	s.mux.HandleFunc("GET /v1/pull", s.authed(s.pull))
-	return s, nil
+	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequest)
+	r.Body = http.MaxBytesReader(w, r.Body, int64(s.Limits.OrDefaults().PushBytes))
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -125,37 +120,20 @@ func (s *Server) storeID(bucket string) (string, error) {
 	return s.store.StoreID(bucket)
 }
 
-// Result is the answer for one pushed item: stored with its sequence number, or not stored because
-// the server holds a version with a later timestamp, returned in Current, or refused with a
-// Code (one of synckosh.Refused...) and an Error to read.
-type Result struct {
-	OK       bool           `json:"ok"`
-	Sequence uint64         `json:"sequence,omitempty"`
-	Current  *synckosh.Item `json:"current,omitempty"`
-	Code     string         `json:"code,omitempty"`
-	Error    string         `json:"error,omitempty"`
-}
+func refused(code, msg string) *synckosh.Result { return &synckosh.Result{Code: code, Error: msg} }
 
-func refused(code, msg string) *Result { return &Result{Code: code, Error: msg} }
-
-func (s *Server) check(raw json.RawMessage) (synckosh.Item, *Result) {
-	if len(raw) > maxItem {
-		return synckosh.Item{}, refused(synckosh.RefusedTooBig, "item over 1 MB")
+func (s *Server) check(raw json.RawMessage, limits synckosh.Limits) (synckosh.Item, *synckosh.Result) {
+	if len(raw) > limits.ItemBytes {
+		return synckosh.Item{}, refused(synckosh.RefusedTooBig, fmt.Sprintf("item over %d bytes", limits.ItemBytes))
 	}
 	var it synckosh.Item
 	if err := json.Unmarshal(raw, &it); err != nil {
 		return synckosh.Item{}, refused(synckosh.RefusedInvalid, err.Error())
 	}
-	switch {
-	case !nameRe.MatchString(it.Collection):
-		return it, refused(synckosh.RefusedInvalid, "collection: lowercase letters, digits, dot, dash or underscore, up to 64")
-	case !nameRe.MatchString(it.Datatype):
-		return it, refused(synckosh.RefusedInvalid, "datatype: lowercase letters, digits, dot, dash or underscore, up to 64")
-	case !guidRe.MatchString(it.GUID):
-		return it, refused(synckosh.RefusedInvalid, "guid: letters, digits and ._:~- up to 128")
-	case it.Timestamp <= 0:
-		return it, refused(synckosh.RefusedInvalid, "timestamp: the time of the edit, in milliseconds")
-	case it.Timestamp > s.now().Add(synckosh.MaxAhead).UnixMilli():
+	if err := synckosh.Valid(it); err != nil {
+		return it, refused(synckosh.RefusedInvalid, err.Error())
+	}
+	if it.Timestamp > s.now().Add(synckosh.MaxAhead).UnixMilli() {
 		return it, refused(synckosh.RefusedTimestampAhead, "timestamp is more than a day ahead of the server's clock")
 	}
 	it.Sequence, it.DeletedAt = 0, 0 // the server's to set
@@ -172,14 +150,15 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 		fail(w, http.StatusBadRequest, `body: {"items": [...]}: `+err.Error())
 		return
 	}
-	if len(req.Items) > MaxPush {
-		fail(w, http.StatusRequestEntityTooLarge, "more than 1000 items in one push")
+	limits := s.Limits.OrDefaults()
+	if len(req.Items) > limits.PushItems {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("more than %d items in one push", limits.PushItems))
 		return
 	}
 	in := make([]synckosh.Item, len(req.Items))
-	errs := make([]*Result, len(req.Items))
+	errs := make([]*synckosh.Result, len(req.Items))
 	for i, raw := range req.Items {
-		in[i], errs[i] = s.check(raw)
+		in[i], errs[i] = s.check(raw, limits)
 	}
 
 	s.write.Lock()
@@ -194,7 +173,7 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 		internal(w, r, err)
 		return
 	}
-	res := make([]Result, len(in))
+	res := make([]synckosh.Result, len(in))
 	type key struct{ collection, guid string }
 	batch := map[key]int{} // items of this push already chosen to store, by index in out
 	var out []synckosh.Item
@@ -214,7 +193,7 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 		}
 		if has && it.Timestamp < cur.Timestamp {
 			c := cur
-			res[i] = Result{Current: &c}
+			res[i] = synckosh.Result{Current: &c}
 			continue
 		}
 		// Newer, or made in the same millisecond: the later push wins. A retry of an edit
@@ -233,7 +212,7 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 			batch[k] = len(out)
 			out = append(out, it)
 		}
-		res[i] = Result{OK: true, Sequence: seq}
+		res[i] = synckosh.Result{OK: true, Sequence: seq}
 	}
 	if len(out) > 0 {
 		if err := s.store.Put(bucket, out); err != nil {
@@ -247,7 +226,7 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
 	q := r.URL.Query()
 	collection := q.Get("collection")
-	if collection != "" && !nameRe.MatchString(collection) {
+	if collection != "" && !synckosh.ValidName(collection) {
 		fail(w, http.StatusBadRequest, "collection: the collection to pull, or none for every collection")
 		return
 	}
@@ -260,28 +239,19 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
 		}
 		after = n
 	}
-	limit := pageSize
-	if v := q.Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > maxPageSize {
-			fail(w, http.StatusBadRequest, "limit: 1 to 1000")
-			return
-		}
-		limit = n
-	}
 	id, err := s.storeID(bucket)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
-	items, err := s.store.Since(bucket, collection, after, limit+1)
+	items, err := s.store.Since(bucket, collection, after, pageSize+1)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
-	more := len(items) > limit
+	more := len(items) > pageSize
 	if more {
-		items = items[:limit]
+		items = items[:pageSize]
 	}
 	next := after
 	if len(items) > 0 {

@@ -150,3 +150,32 @@ func TestBetween(t *testing.T) {
 		t.Fatal("Less")
 	}
 }
+
+func TestValid(t *testing.T) {
+	ok := Item{Collection: "bookmarks", Datatype: "bookmark", GUID: NewGUID(), Timestamp: 1}
+	if err := Valid(ok); err != nil {
+		t.Fatal(err)
+	}
+	if err := Valid(Item{Collection: KeysCollection, Datatype: SealedKeyDatatype, GUID: "g", Timestamp: 1}); err != nil {
+		t.Fatalf("a sealed copy: %v", err)
+	}
+	for name, change := range map[string]func(*Item){
+		"capital":              func(i *Item) { i.Collection = "Bookmarks" },
+		"newline":              func(i *Item) { i.Datatype = "a\nb" },
+		"reserved collection":  func(i *Item) { i.Collection = "_bookmarks" },
+		"reserved datatype":    func(i *Item) { i.Datatype = "_bookmark" },
+		"sealed key elsewhere": func(i *Item) { i.Datatype = SealedKeyDatatype },
+		"other type in keys":   func(i *Item) { i.Collection = KeysCollection },
+		"guid with underscore": func(i *Item) { i.GUID = "_g" },
+		"guid with a space":    func(i *Item) { i.GUID = "a b" },
+		"guid too long":        func(i *Item) { i.GUID = strings.Repeat("a", 129) },
+		"collection too long":  func(i *Item) { i.Collection = strings.Repeat("a", 65) },
+		"no timestamp":         func(i *Item) { i.Timestamp = 0 },
+	} {
+		it := ok
+		change(&it)
+		if Valid(it) == nil {
+			t.Errorf("%s: valid", name)
+		}
+	}
+}

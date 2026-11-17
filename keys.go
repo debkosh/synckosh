@@ -11,13 +11,6 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// The keys collection holds one sealed copy of the data key per passphrase. Its items are sealed
-// by their passphrase, not by the data key.
-const (
-	KeysCollection    = "keys"
-	SealedKeyDatatype = "sealed-key"
-)
-
 var (
 	ErrPassphrase = errors.New("wrong passphrase")
 	ErrUnknownKey = errors.New("sealed with a key this device doesn't have")

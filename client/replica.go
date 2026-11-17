@@ -40,21 +40,23 @@ type Config struct {
 	Client *Client
 	Local  Local
 	Key    *synckosh.DataKey
+	Limits synckosh.Limits // this device's; zero fields take synckosh.DefaultLimits
 }
 
 // Replica is one device's copy of a bucket. Its methods may be called from any goroutine,
 // one at a time.
 type Replica struct {
-	mu    sync.Mutex
-	c     *Client
-	local Local
-	key   *synckosh.DataKey
-	clock *synckosh.Clock
+	mu     sync.Mutex
+	c      *Client
+	local  Local
+	key    *synckosh.DataKey
+	limits synckosh.Limits
+	clock  *synckosh.Clock
 }
 
 // Open opens a device's replica, with its clock where it left off.
 func Open(cfg Config) (*Replica, error) {
-	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, clock: synckosh.NewClock()}
+	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, limits: cfg.Limits.OrDefaults(), clock: synckosh.NewClock()}
 	b, err := r.local.Meta("clock")
 	if err != nil {
 		return nil, err
@@ -75,10 +77,12 @@ func (r *Replica) saveClock() error {
 }
 
 // Put records edits made here, in one write. A new item gets a new guid; an existing one keeps
-// its guid. Timestamps are set here. It returns the items as stored.
+// its guid. Timestamps are set here. It returns the items as stored. If any item is invalid, or
+// too big to push once sealed, it returns an error and stores none of them.
 func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	out := make([]synckosh.Item, len(its))
 	for i, it := range its {
 		if it.GUID == "" {
 			it.GUID = synckosh.NewGUID()
@@ -91,9 +95,12 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 			it.Extra = old.Item.Extra
 		}
 		it.Deleted, it.Sequence, it.DeletedAt = false, 0, 0
-		its[i] = it
+		out[i] = it
 	}
-	return its, r.write(its...)
+	if err := r.write(out...); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // Delete marks an item deleted. It keeps its data, so it can be restored by putting it again,
@@ -124,12 +131,35 @@ func (r *Replica) write(its ...synckosh.Item) error {
 	es := make([]Entry, len(its))
 	for i := range its {
 		its[i].Timestamp = ts
+		if err := r.check(its[i]); err != nil {
+			return err
+		}
 		es[i] = Entry{Item: its[i], Pending: true}
 	}
 	if err := r.local.Put(es...); err != nil {
 		return err
 	}
 	return r.saveClock()
+}
+
+// check refuses an edit the server would refuse for good: an invalid name, or an item over this
+// device's item limit once sealed. Left pending, it would be refused on every Sync.
+func (r *Replica) check(it synckosh.Item) error {
+	if err := synckosh.Valid(it); err != nil {
+		return fmt.Errorf("%s %s: %w", it.Collection, it.GUID, err)
+	}
+	sealed, err := r.key.Seal(it)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(sealed)
+	if err != nil {
+		return err
+	}
+	if len(b) > r.limits.ItemBytes {
+		return fmt.Errorf("%s %s: %d bytes sealed, over the item limit of %d", it.Collection, it.GUID, len(b), r.limits.ItemBytes)
+	}
+	return nil
 }
 
 // Get returns an item, deleted or not.
@@ -332,7 +362,7 @@ func (r *Replica) take(remote synckosh.Item) (Entry, bool, error) {
 	return Entry{Item: remote}, true, nil
 }
 
-// push sends what changed here, 1000 items at a time. When a push's sequence numbers follow
+// push sends what changed here, as many items at a time as the limits allow. When a push's sequence numbers follow
 // straight on from the cursor, nothing else reached the server in between, so the cursor moves
 // past them and this device doesn't pull its own items back. Otherwise the next pull brings
 // what came in between, and these items with it.
@@ -347,7 +377,7 @@ func (r *Replica) push(ctx context.Context) (restart bool, refused *RefusedError
 		return false, nil, err
 	}
 	for len(pending) > 0 {
-		n := min(len(pending), 1000)
+		n := min(len(pending), r.limits.PushItems)
 		batch := pending[:n]
 		pending = pending[n:]
 		out := make([]synckosh.Item, n)

@@ -51,10 +51,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := server.New(st, auth)
-	if err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(st, auth)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 	key, err := synckosh.NewDataKey()
@@ -293,7 +290,7 @@ func TestNewStoreIDRefills(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	srv, _ := server.New(st, auth)
+	srv := server.New(st, auth)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	for _, d := range []*device{mac, phone} {
