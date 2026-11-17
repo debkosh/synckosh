@@ -1,0 +1,129 @@
+{
+  "data_key": {
+    "id": "k_4zUqk3LbrtI",
+    "key": "EqZ5lhDu1jy4OWSYfIxrMcggf6sjTDtjrx2t2cjw60w"
+  },
+  "items": [
+    {
+      "item": {
+        "base": 41,
+        "collection": "notes",
+        "datatype": "note",
+        "deleted": false,
+        "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d07",
+        "private": {
+          "text": "hello"
+        },
+        "public": {
+          "parent": "root",
+          "t": "a<b&c é"
+        },
+        "timestamp": 1763380800000
+      },
+      "public_in_box": false,
+      "additional_data": "notes\nnote\n019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d07\n1763380800000\n0\n41\n0",
+      "box_opens_to": "{\"text\":\"hello\"}",
+      "sealed": {
+        "base": 41,
+        "collection": "notes",
+        "datatype": "note",
+        "deleted": false,
+        "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d07",
+        "private": {
+          "key": "k_4zUqk3LbrtI",
+          "box": "GxOHra4fLcOV3D8FO4V45P2satDi5pUUFlqs5xbEjgvXjvx+xiC60byKyOK7OkWt0JsgabQFnK0"
+        },
+        "public": {
+          "parent": "root",
+          "t": "a<b&c é"
+        },
+        "timestamp": 1763380800000
+      }
+    },
+    {
+      "item": {
+        "collection": "notes",
+        "datatype": "note",
+        "deleted": true,
+        "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d08",
+        "public": {
+          "parent": "root"
+        },
+        "timestamp": 1763380800001
+      },
+      "public_in_box": true,
+      "additional_data": "notes\nnote\n019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d08\n1763380800001\n1\n\n1",
+      "box_opens_to": "[{\"parent\":\"root\"},null]",
+      "sealed": {
+        "collection": "notes",
+        "datatype": "note",
+        "deleted": true,
+        "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d08",
+        "private": {
+          "key": "k_4zUqk3LbrtI",
+          "box": "1RmexN3ZkfDmoIeXh8SYuKkZ3OoAuh12lR9BN8nh5kIRfc5Mt5jtL3pPVehCTbDvdev4C3RFzfMPOVeK7U9m7g",
+          "public": true
+        },
+        "public": {
+          "parent": "root"
+        },
+        "timestamp": 1763380800001
+      }
+    },
+    {
+      "item": {
+        "collection": "history",
+        "datatype": "_deletebefore",
+        "deleted": false,
+        "guid": "_deletebefore",
+        "public": {
+          "before": 1763380000000
+        },
+        "timestamp": 1763380800002
+      },
+      "public_in_box": true,
+      "additional_data": "history\n_deletebefore\n_deletebefore\n1763380800002\n0\n\n1",
+      "box_opens_to": "[{\"before\":1763380000000},null]",
+      "sealed": {
+        "collection": "history",
+        "datatype": "_deletebefore",
+        "deleted": false,
+        "guid": "_deletebefore",
+        "private": {
+          "key": "k_4zUqk3LbrtI",
+          "box": "GteasbqRA4VSDqUxOSCTvOIIq/EG4P18YyXur8D40YsZqhFe7sf7rNAZ4paxSLcFDQY1/JapidnOEDLj5PKoaVz83TGojKo",
+          "public": true
+        },
+        "public": {
+          "before": 1763380000000
+        },
+        "timestamp": 1763380800002
+      }
+    }
+  ],
+  "sealed_copy": {
+    "passphrase": "correct horse battery staple",
+    "item": {
+      "collection": "_sealedkeys",
+      "datatype": "_sealedkey",
+      "deleted": false,
+      "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d09",
+      "private": {
+        "key": "k_4zUqk3LbrtI",
+        "box": "bp4/sj3zXO0CcswUHZ0SU80fTBBBsTTgzYuWmNFc+TBRbjeLU7U5foqVHrHWvdT8a/6LcaI1qvl5nMU6/wjJnE4lCkSREPP/F4TPuNK9WieoKQloDt4yK9rOfOXhJk+VqHtfzWlCld0uKH2CaA6rYqP5KDorACtny0d23HfiTNk5rzxdWn5+mdGyFIeUsrOVqqPE7OEI/kdwrgkxdVBVNd2e9nUvzg8pqG5mNyL03QWSeMKdMnKTXcaq49xqn/jNyIs3xR4Q7xY8afpU2IQIlt6cTAOGBaUoCUL5pwJby5LtrEPLjc8T7g75FhyfgPoIZwrA63n4xPehwaSQNZE+tfiUWOBD",
+        "public": true
+      },
+      "public": {
+        "label": "Main",
+        "key": "k_4zUqk3LbrtI",
+        "kdf": "argon2id",
+        "t": 3,
+        "m": 65536,
+        "p": 4,
+        "salt": "QcyYwKbDF8WQAETnAR36fg",
+        "box": "VGeNlTKcSq5gS0RjB1hld17JYjuDV5yr8ECjIR4Rb+lY9Iu0EWFuI0bFeNQRAuRVWIPXuv1zt9LfcJ/gGKklKy8MRQyYylUD"
+      },
+      "timestamp": 1763380800003
+    }
+  }
+}

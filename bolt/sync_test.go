@@ -227,8 +227,6 @@ func TestNewestWins(t *testing.T) {
 	}
 }
 
-// A login is items: the login, its fields, and each value of its password as its own item,
-// never an edit, so two devices changing it at once both keep theirs.
 // Two devices that haven't seen each other's edit can stamp them in the same millisecond. The
 // later push wins on the server, and every device takes the server's copy.
 func TestSameMillisecondLaterPushWins(t *testing.T) {

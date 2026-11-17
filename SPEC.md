@@ -2,6 +2,7 @@
 
 How devices sync a bucket's data through a synckosh server. The Go packages in this repo are
 the reference: `client` for a device, `server` for the server, `bolt` for storage on both.
+[testdata/vectors.json](testdata/vectors.json) holds test vectors for the sealing.
 
 ## The model
 
@@ -14,8 +15,9 @@ Three levels name where an item lives:
 
 - **Everything is an item.** An item has a collection, a datatype, a guid, a timestamp, a deleted flag,
   a public part and a private part.
-- **For each guid, the item with the newest timestamp wins;** in the same millisecond, the one
-  the server stored last. That is all the server does with items. It never opens a private part.
+- **An item is named by its collection and guid.** For each, the version with the newest
+  timestamp wins; in the same millisecond, the one the server stored last. That, and a
+  collection's delete-before, is all the server does with items. It never opens a private part.
 - **Sync knows only items.** The protocol has no schema: what an item holds, and how items relate,
   is the app's choice. Nothing is ever deleted because of another item, but for a collection's
   delete-before.
@@ -58,11 +60,14 @@ Fields a reader doesn't know are kept and written back unchanged, by the server 
 
 ### Reserved names
 
-Names that start with `_` belong to the protocol; an app's names can't start with one. The
-collection `_sealedkeys` holds the data key's sealed copies, of datatype `_sealedkey`, and
-nothing else. A collection's delete-before has datatype and guid `_deletebefore`, is never
-deleted, and its public part is `{"before": <milliseconds>}`. A server refuses, and a device neither writes nor takes, an item whose names break
-these rules.
+Names that start with `_` belong to the protocol; an app's names can't start with one. There
+are two:
+- the collection `_sealedkeys` holds the data key's sealed copies, of datatype `_sealedkey`, and
+  nothing else;
+- a collection's delete-before has datatype and guid `_deletebefore`, is never deleted, and its
+  public part is `{"before": <milliseconds>}`.
+
+A server refuses, and a device neither writes nor takes, an item that breaks these rules.
 
 ### Timestamps
 
@@ -224,8 +229,8 @@ its cutoff, `before`. Deleting a browser's history is one such item, not one del
 When a bucket has a data key, the server, and anyone who controls it or the connection, cannot read
 a private part. It cannot make a device that holds the key use anything a key holder did not
 write: it cannot forge, alter or move an item, mark one deleted, or make a device delete a
-collection's items before a cutoff. Public parts are checked only
-for items sealed with their public part; for the others, the server can change the public part.
+collection's items before a cutoff. Public parts are checked only for items sealed with their
+public part; for the others, the server can change the public part.
 
 An item sealed under a key the device doesn't hold is kept as locked. A locked item is
 unverified: it changes nothing the device holds and is never sent on, and an app must not trust
@@ -261,6 +266,10 @@ the host refuses is answered 401.
 
 Every answer to push and pull carries `store`: the bucket's store id.
 
+A call that fails is answered with a status and `{"error": "..."}`, for a person: 400 for a
+malformed request, 401 when the host refuses the sign-in, 413 for a push over the server's limits
+(with `limits`, below), and 500 for a fault on the server.
+
 ### Push
 
 As many items as the server's limits allow, stored in one write. A push is its bucket's only
@@ -291,13 +300,13 @@ by how much its clock is wrong.
 ### Pull
 
 The bucket's items with `sequence` greater than `after`, of every collection, lowest first, a page
-at a time: `{"store", "items": [...], "next": n, "more": bool, "time": ms, "cleanup": ms}`. `time` is
-the server's clock, and `cleanup` the age after which it removes deleted items, absent if it never
-does. A page holds items up to the lower
-of the server's page bytes and `bytes`, the most the device reads, but always at least one item. The
-device keeps `next` and passes it as `after` next time. A collection another device starts using
-just shows up. `collection=` limits a pull to one collection, for a device joining with a passphrase that
-reads only `_sealedkeys` first.
+at a time: `{"store", "items": [...], "next": n, "more": bool, "time": ms, "cleanup": ms}`.
+`time` is the server's clock, and `cleanup` the age after which it removes deleted items, absent
+if it never does. A page holds items up to the lower of the server's page bytes and `bytes`, the
+most the device reads, but always at least one item. The device keeps `next` and passes it as
+`after` next time. A collection another device starts using just shows up. `collection=` limits a
+pull to one collection, for a device joining with a passphrase that reads only `_sealedkeys`
+first.
 
 The pull goes by when the server stored an item, not by when it was made, so an old item pushed
 back later still reaches every device.
@@ -309,11 +318,13 @@ may have lost any of that bucket's data: a wipe, a restore from a backup, a move
 After restoring the whole store from a backup, `server.ResetAll` changes every bucket's.
 A device that sees a store id it didn't sync with last pushes everything it has, live and
 deleted, with the timestamps they were made with, and reads every collection from the start. Newest
-wins settles the rest. To make that survive a crash, the device marks every entry it can open
-pending, clears every entry's `sequence` and `base`, which mean nothing on the new store, resets
-its cursor, and saves the new store id last: a crash anywhere before repeats the refill. A new device meanwhile gets what is there, then the rest as it arrives.
-A device that removed deleted items has none to push, so after a reset an item can come back if a
-device that never saw its delete still holds it, unless some device keeps deleted items.
+wins settles the rest. A new device meanwhile gets what is there, then the rest as it arrives.
+
+To make that survive a crash, the device marks every entry it can open pending, clears every
+entry's `sequence` and `base`, which mean nothing on the new store, resets its cursor, and saves
+the new store id last: a crash anywhere before repeats the refill. A device that removed deleted
+items has none to push, so after a reset an item can come back if a device that never saw its
+delete still holds it, unless some device keeps deleted items.
 
 ### Limits
 
@@ -353,7 +364,7 @@ until the app removes those deleted, or before a cutoff, longer ago than an age 
 ## A device's sync
 
 1. Pull from the cursor, every collection at once. Take each item, unless this device's version has
-   a later timestamp.
+   a later timestamp, rejecting or locking what it can't open, and merging as above.
 2. If the store id changed, refill: mark everything pending, store id last, and start again from
    the beginning. Otherwise, if this device is away longer than the cleanup age, start over.
 3. Push everything changed here. For each `current` that comes back, take it.

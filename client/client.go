@@ -1,6 +1,6 @@
 // Package client is the synckosh client: a Replica keeps one device's copy of a bucket's
 // items in a Local store, and syncs it with a server. Signing in is the host's business: it
-// gives the Replica an http.Client that adds whatever the server expects.
+// gives the Client a bearer token, or an http.Client that adds whatever the server expects.
 package client
 
 import (
