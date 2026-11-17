@@ -126,14 +126,47 @@ The protocol knows items and nothing else. How an app shapes its data is its own
 per record, or a record split across several items, with or without parents. A few facts hold
 whatever it chooses:
 
-- **Newest wins per item.** Two devices editing the same item keep only the later edit; edits to
-  different items all survive. An app that needs two concurrent changes both kept puts them in
-  different items.
+- **Newest wins per item,** unless the datatype has a merger, below. Without one, two devices
+  editing the same item keep only the later edit; edits to different items all survive.
 - **A parent is just a field.** An item may name another item in its public part. Sync never
   follows it. An item whose parent is missing, deleted or part of a loop is still alive, and the
   app decides how to show it.
 - **Order is a field too.** Two devices can give two items the same order key. `synckosh.Between`
   is an optional helper that makes a key between two others.
+
+### Merging
+
+The server keeps one version per item and every device ends on it, so convergence never depends
+on merging. A merge is only a new edit that some device pushes, and devices with different
+mergers, or none, still converge.
+
+`base` is set when an edit is made: the `sequence` of the stored version it was made from; for an
+edit of an edit not yet sent, that one's `base`; none for a new item. It is sealed, so a server
+can't start a merge by changing it. A refill clears it on every entry.
+
+A device that holds version L of an item and receives version R from the server, in a pull or as
+`current`, both openable, decides in this order:
+
+1. **R is the device's own earlier push**, whose answer it never saw. Before a push goes out, the
+   device keeps the timestamp each entry is sent with; an edit of that entry carries it over. If
+   R has that timestamp and L is still that version, the device takes R. If L was edited since, it
+   keeps L, sets L's `base` to R's `sequence`, and forgets the sent timestamp.
+2. **They never met** when either L is an edit not yet sent, with a `base`, and R's `sequence` is
+   above it; or L is stored, R's `sequence` is above L's, R's timestamp is not before L's, and R
+   has a `base` below L's `sequence`.
+3. If they never met, both have the same datatype, and that datatype has a merger: when the two,
+   or the merger's result and R, have the same deleted flag, public and private parts, the device
+   takes R. Otherwise it stores the result as a new edit: timestamp from its clock, after R's;
+   `base` R's `sequence`; pending.
+4. In every other case newest wins: the device takes R unless L has a later timestamp.
+
+A merger gets no common ancestor, so it is right only for data that can be joined without one.
+
+One race stays open. Device B pulls; A pushes V; B pushes W, stored over V. The server now holds
+only W, and B never saw V. A device that pulled V merges when it pulls W; but if a third device
+edits W and pushes before any holder of V pulls, V's change is lost unmerged, which is newest wins.
+A store reset between one sync's pull and its push lets edits carry old-store `base` numbers onto
+the new store, where a device may merge once for no reason, or miss one merge.
 
 ### Deleting before a cutoff
 

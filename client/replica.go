@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,12 +14,23 @@ import (
 )
 
 // Entry is an item as a device keeps it: opened, and marked pending until the server has it.
-// A locked entry is one sealed under a key this device doesn't hold, kept as it came.
+// A locked entry is one sealed under a key this device doesn't hold, kept as it came. Sent is
+// the timestamp the entry was last pushed with, until the device sees the server's answer: a
+// version with that timestamp is this device's own push, even when the answer was lost.
 type Entry struct {
 	Item    synckosh.Item `json:"item"`
 	Pending bool          `json:"pending,omitempty"`
 	Locked  bool          `json:"locked,omitempty"`
+	Sent    int64         `json:"sent,omitempty"`
 }
+
+// Merger joins two versions of one item that never saw each other: one edited here, or held
+// here, and one from the server. It gets no common ancestor, so it is only right for data that
+// can be joined without one: fields that carry their own clocks, or sets that only grow. A
+// merger that unions plain fields brings deletions back. It must be a pure function, and should
+// give the same content whichever version is local. Only Deleted, Public and Private of the
+// result are used.
+type Merger func(local, remote synckosh.Item) synckosh.Item
 
 // Local is a device's own store. It is the real copy of the data: if the server loses
 // anything, devices push it back from here. Package bolt has one.
@@ -54,7 +66,9 @@ type Config struct {
 	// a device removes an item once the server holds its delete, and removes a collection's
 	// items at or before a delete-before cutoff as soon as it writes or receives it.
 	KeepDeleted bool
-	Limits      synckosh.Limits // this device's; zero fields take synckosh.DefaultLimits
+	// Mergers join concurrent versions, by datatype. A datatype with none keeps the newest.
+	Mergers map[string]Merger
+	Limits  synckosh.Limits // this device's; zero fields take synckosh.DefaultLimits
 }
 
 // Replica is one device's copy of a bucket. Its methods may be called from any goroutine,
@@ -66,6 +80,7 @@ type Replica struct {
 	key         *synckosh.DataKey
 	sealPublic  map[string]bool
 	keepDeleted bool
+	mergers     map[string]Merger
 	limits      synckosh.Limits
 	clock       *synckosh.Clock
 }
@@ -73,7 +88,7 @@ type Replica struct {
 // Open opens a device's replica, with its clock where it left off.
 func Open(cfg Config) (*Replica, error) {
 	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, sealPublic: cfg.SealPublic,
-		keepDeleted: cfg.KeepDeleted, limits: cfg.Limits.OrDefaults(), clock: synckosh.NewClock()}
+		keepDeleted: cfg.KeepDeleted, mergers: cfg.Mergers, limits: cfg.Limits.OrDefaults(), clock: synckosh.NewClock()}
 	b, err := r.local.Meta("clock")
 	if err != nil {
 		return nil, err
@@ -134,7 +149,7 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 		if has {
 			it.Extra = old.Item.Extra
 		}
-		it.Deleted, it.Base, it.Sequence, it.DeletedAt = false, 0, 0, 0
+		it.Deleted, it.Sequence, it.DeletedAt = false, 0, 0
 		out[i] = it
 	}
 	if err := r.write(out...); err != nil {
@@ -157,7 +172,7 @@ func (r *Replica) Delete(collection, guid string) error {
 		return fmt.Errorf("%s %s: %w", collection, guid, ErrLocked)
 	}
 	it := e.Item
-	it.Deleted, it.Base, it.Sequence, it.DeletedAt = true, 0, 0, 0
+	it.Deleted, it.Sequence, it.DeletedAt = true, 0, 0
 	return r.write(it)
 }
 
@@ -228,15 +243,30 @@ func (r *Replica) cutoff(collection string) (int64, error) {
 
 // write stores edits made here, all with one timestamp, so a write of many items doesn't move
 // the clock ahead of the wall clock.
+//
+// Each edit's base is the sequence number of the stored version it was made from. An edit of an
+// edit not yet sent keeps that one's base, and its Sent, as the server may hold it already.
 func (r *Replica) write(its ...synckosh.Item) error {
 	ts := r.clock.Now()
 	es := make([]Entry, len(its))
 	for i := range its {
+		e := Entry{Pending: true}
+		its[i].Base = 0
+		old, has, err := r.local.Get(its[i].Collection, its[i].GUID)
+		switch {
+		case err != nil:
+			return err
+		case has && old.Pending:
+			its[i].Base, e.Sent = old.Item.Base, old.Sent
+		case has:
+			its[i].Base = old.Item.Sequence
+		}
 		its[i].Timestamp = ts
 		if err := r.check(its[i]); err != nil {
 			return err
 		}
-		es[i] = Entry{Item: its[i], Pending: true}
+		e.Item = its[i]
+		es[i] = e
 	}
 	if err := r.local.Put(es...); err != nil {
 		return err
@@ -487,12 +517,12 @@ func (r *Replica) checkStore(id string) (bool, error) {
 // refill marks every entry this device can open pending, to push it all back, and reads from
 // the start. Locked entries are not pushed: the devices that can open them hold the real copy.
 // Sequence numbers of the old store mean nothing on the new one, so every entry loses its
-// sequence and base, and a refill never merges.
+// sequence, base and Sent, and a refill never merges.
 func (r *Replica) refill() error {
 	var all []Entry
 	err := r.local.Each("", func(e Entry) error {
 		e.Pending = e.Pending || !e.Locked
-		e.Item.Sequence, e.Item.Base = 0, 0
+		e.Item.Sequence, e.Item.Base, e.Sent = 0, 0, 0
 		all = append(all, e)
 		return nil
 	})
@@ -633,11 +663,64 @@ func (r *Replica) take(remote synckosh.Item, rp *report, ch *changes) error {
 		return nil
 	}
 	r.clock.Observe(opened.Timestamp)
-	if has && !e.Locked && e.Item.Timestamp > opened.Timestamp {
+	if !has || e.Locked {
+		r.keep(ch, Entry{Item: opened})
+		return nil
+	}
+	if e.Sent != 0 && opened.Timestamp == e.Sent {
+		// This device's own push, whose answer was lost: they have met.
+		if e.Item.Timestamp == e.Sent {
+			r.keep(ch, Entry{Item: opened})
+		} else {
+			e.Item.Base, e.Sent = opened.Sequence, 0 // edited again since
+			ch.put = append(ch.put, e)
+		}
+		return nil
+	}
+	if merge := r.mergers[opened.Datatype]; merge != nil && neverMet(e, opened) && e.Item.Datatype == opened.Datatype {
+		m := merge(e.Item, opened)
+		if sameContent(e.Item, opened) || sameContent(m, opened) {
+			r.keep(ch, Entry{Item: opened})
+			return nil
+		}
+		// A new edit, after the remote one and made from it.
+		it := opened
+		it.Deleted, it.Public, it.Private = m.Deleted, m.Public, m.Private
+		it.Timestamp, it.Base, it.Sequence, it.DeletedAt = r.clock.Now(), opened.Sequence, 0, 0
+		ch.put = append(ch.put, Entry{Item: it, Pending: true})
+		return nil
+	}
+	if e.Item.Timestamp > opened.Timestamp {
 		return nil // this device's version is later, and is pushed
 	}
 	r.keep(ch, Entry{Item: opened})
 	return nil
+}
+
+// neverMet says whether a version from the server was made without seeing the one held here:
+// the held one is an edit not yet sent, made from a version before the remote one; or it is
+// stored, and the remote one, newer, was made from a version before it. A version with no base,
+// a new item or one pushed back in a refill, never merges.
+func neverMet(local Entry, remote synckosh.Item) bool {
+	if local.Pending {
+		return local.Item.Base != 0 && remote.Sequence > local.Item.Base
+	}
+	return local.Item.Sequence != 0 && remote.Sequence > local.Item.Sequence &&
+		remote.Timestamp >= local.Item.Timestamp && remote.Base != 0 && remote.Base < local.Item.Sequence
+}
+
+// sameContent says whether two versions hold the same: then a merge makes no new edit, so
+// devices merging the same pair don't push one each.
+func sameContent(a, b synckosh.Item) bool {
+	return a.Deleted == b.Deleted && sameJSON(a.Public, b.Public) && sameJSON(a.Private, b.Private)
+}
+
+func sameJSON(a, b json.RawMessage) bool {
+	var ca, cb bytes.Buffer
+	if json.Compact(&ca, a) != nil || json.Compact(&cb, b) != nil {
+		return bytes.Equal(a, b)
+	}
+	return bytes.Equal(ca.Bytes(), cb.Bytes())
 }
 
 // push sends what changed here, as many items at a time as the limits allow. When a push's
@@ -659,10 +742,14 @@ func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error
 		batch := pending[:n]
 		pending = pending[n:]
 		out := make([]synckosh.Item, n)
-		for i, e := range batch {
-			if out[i], err = r.seal(e.Item); err != nil {
+		for i := range batch {
+			if out[i], err = r.seal(batch[i].Item); err != nil {
 				return false, err
 			}
+			batch[i].Sent = batch[i].Item.Timestamp
+		}
+		if err := r.local.Put(batch...); err != nil {
+			return false, err
 		}
 		res, err := r.c.Push(ctx, out)
 		if err != nil {
@@ -683,7 +770,7 @@ func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error
 				// Stored, or, with no sequence number, at or before the collection's
 				// delete-before cutoff, which the server doesn't store again.
 				e := batch[i]
-				e.Item.Sequence, e.Pending = rs.Sequence, false
+				e.Item.Sequence, e.Pending, e.Sent = rs.Sequence, false, 0
 				r.keep(&ch, e)
 				if rs.Sequence == 0 {
 					continue
@@ -706,7 +793,7 @@ func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error
 					rp.refused.Ahead = max(rp.refused.Ahead, time.Duration(it.Timestamp-res.Time)*time.Millisecond)
 					r.clock.Reset(res.Time)
 					e := batch[i]
-					e.Item.Timestamp = r.clock.Now()
+					e.Item.Timestamp, e.Sent = r.clock.Now(), 0
 					ch.put = append(ch.put, e)
 				}
 			}
