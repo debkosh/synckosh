@@ -223,21 +223,27 @@ func TestGUIDsSortByWhenMade(t *testing.T) {
 	}
 }
 
+func between(t *testing.T, a, b string) string {
+	t.Helper()
+	k, err := Between(a, b)
+	if err != nil {
+		t.Fatalf("Between(%q, %q): %v", a, b, err)
+	}
+	return k
+}
+
 func TestBetween(t *testing.T) {
-	keys := []string{Between("", "")}
+	keys := []string{between(t, "", "")}
 	// Insert at the start, the end and in the middle, many times; the list stays in order.
 	for i := 0; i < 2000; i++ {
-		var k string
 		switch i % 3 {
 		case 0:
-			k = Between("", keys[0])
-			keys = append([]string{k}, keys...)
+			keys = append([]string{between(t, "", keys[0])}, keys...)
 		case 1:
-			k = Between(keys[len(keys)-1], "")
-			keys = append(keys, k)
+			keys = append(keys, between(t, keys[len(keys)-1], ""))
 		default:
 			j := len(keys) / 2
-			k = Between(keys[j-1], keys[j])
+			k := between(t, keys[j-1], keys[j])
 			keys = append(keys[:j], append([]string{k}, keys[j:]...)...)
 		}
 	}
@@ -249,6 +255,38 @@ func TestBetween(t *testing.T) {
 	if !Less("a", "2", "b", "1") || !Less("a", "1", "a", "2") {
 		t.Fatal("Less")
 	}
+}
+
+// Keys come from other devices, so Between answers every input, never hanging or panicking.
+func TestBetweenWithoutRoom(t *testing.T) {
+	for _, c := range [][2]string{{"V", "V0"}, {"", "0"}, {"", "000"}, {"V", "V"}, {"W", "V"}, {"Vz", "V"}} {
+		if k, err := Between(c[0], c[1]); !errors.Is(err, ErrNoRoom) {
+			t.Errorf("Between(%q, %q) = %q, %v, want ErrNoRoom", c[0], c[1], k, err)
+		}
+	}
+	for _, c := range [][2]string{{"", "!"}, {"a b", ""}, {"V", "é"}} {
+		if _, err := Between(c[0], c[1]); err == nil || errors.Is(err, ErrNoRoom) {
+			t.Errorf("Between(%q, %q): %v, want an error for the character", c[0], c[1], err)
+		}
+	}
+	for _, c := range [][2]string{{"V0", "V1"}, {"zz", ""}, {"V", "V01"}, {"0", "1"}} {
+		between(t, c[0], c[1])
+	}
+}
+
+func FuzzBetween(f *testing.F) {
+	for _, c := range [][2]string{{"", ""}, {"V", "V0"}, {"", "0"}, {"V", "W"}, {"zzz", ""}, {"0", "01"}, {"A0", "A01"}} {
+		f.Add(c[0], c[1])
+	}
+	f.Fuzz(func(t *testing.T, a, b string) {
+		k, err := Between(a, b)
+		if err != nil {
+			return
+		}
+		if k <= a || b != "" && k >= b || strings.HasSuffix(k, "0") {
+			t.Fatalf("Between(%q, %q) = %q", a, b, k)
+		}
+	})
 }
 
 func TestValid(t *testing.T) {
