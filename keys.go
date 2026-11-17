@@ -43,7 +43,9 @@ func NewDataKey() (*DataKey, error) {
 	return k, nil
 }
 
-// Bytes returns the key, for the device to keep in its keychain.
+// Bytes returns the key, only for the device to keep in its own key store, such as the OS
+// keychain. It is never shown, exported or put in a QR code: a person only ever sees a
+// passphrase that opens a sealed copy.
 func (k *DataKey) Bytes() []byte { return append([]byte(nil), k.key[:]...) }
 
 // DataKeyFrom rebuilds a key the device kept.

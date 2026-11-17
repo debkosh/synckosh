@@ -65,7 +65,7 @@ go test ./...
 ```
 
 They sync devices through a real server and bbolt files: newest wins whichever device pushes
-first, and the later push in the same millisecond; a login whose fields and passwords are items keeps both devices' edits; the server's file
+first, and the later push in the same millisecond; edits to different items all survive; the server's file
 never holds a private part in the clear; a new store id refills the server, with a new device
 getting the data as it comes back; 2,500 items page without loss; clearing a collection; reopening a
 device; retries, old versions, timestamps too far ahead and other buckets; cleanup; a device not pulling its own push back, unless another push came in between; a clock

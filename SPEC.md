@@ -10,18 +10,14 @@ Three levels name where an item lives:
   whatever the host makes it: one person's data, a shared list, a family's. The server is told
   which bucket a request is for, and buckets never see each other.
 - **A collection** is a kind of data inside a bucket: `bookmarks`, `logins`, `history`.
-- **A datatype** is what one item is: `folder`, `bookmark`, `login-field`.
+- **A datatype** is what one item is: `folder`, `bookmark`, `todo`.
 
 - **Everything is an item.** An item has a collection, a datatype, a guid, a timestamp, a deleted flag,
   a public part and a private part.
 - **For each guid, the item with the newest timestamp wins;** in the same millisecond, the one
   the server stored last. That is all the server does with items. It never opens a private part.
-- **Items know their parent; sync knows only items.** An item may name a parent in its public
-  part. Sync never follows it. Lists, objects and trees are built by the client from the items
-  that name a parent.
-- **Orphans stay.** An item whose parent is missing or deleted is still alive. Nothing is ever
-  deleted because of another item. Each datatype decides how its orphans show: a bookmark at the top
-  level, a login field not at all.
+- **Sync knows only items.** The protocol has no schema: what an item holds, and how items relate,
+  is the app's choice. Nothing is ever deleted because of another item.
 - **Deletes are updates.** A deleted item stays, marked deleted, so every device hears of it.
   Only the server's cleanup removes items, long after they were deleted.
 - **The devices hold the real copy.** If the server loses anything, devices push it back.
@@ -30,12 +26,12 @@ Three levels name where an item lives:
 
 ```json
 {
-  "collection": "logins",
-  "datatype": "login-field",
+  "collection": "todos",
+  "datatype": "todo",
   "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d07",
   "timestamp": 1763380800000,
   "deleted": false,
-  "public": {"parent": "019a8f3c-5e1f-7a10-8b2e-1c5d0f3a9e42", "key": "password"},
+  "public": {"parent": "019a8f3c-5e1f-7a10-8b2e-1c5d0f3a9e42", "order": "V"},
   "private": {"key": "k_sUwGzUYSPw", "box": "7lg3iKfl2s0W…"},
   "sequence": 42,
   "deleted_at": 1763390000000
@@ -45,7 +41,7 @@ Three levels name where an item lives:
 | Field | Set by | What it is |
 |---|---|---|
 | `collection` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of collections only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64. |
-| `datatype` | device | what the item is, for the client: `folder`, `bookmark`, `login`, `login-field`. Same characters. |
+| `datatype` | device | what the item is, for the app: `folder`, `bookmark`, `todo`. Same characters. |
 | `guid` | device | a UUIDv7 for a new item ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), so guids sort by when they were made. An edit keeps the guid. Letters, digits, `._:~-`, up to 128. |
 | `timestamp` | device | when the edit was made: the device's clock, in milliseconds. |
 | `deleted` | device | true for a deleted item. |
@@ -82,28 +78,22 @@ The private part is sealed with XChaCha20-Poly1305 under the bucket's data key:
 data is the JSON array `[collection, datatype, guid, timestamp, deleted, public]`, so the server can't change
 the public part, or move a private part to another item, without the device noticing.
 
-Structure is public and content is private. For example:
+The app decides, for each datatype, what goes in the public part and what in the private part.
 
-| Datatype | Public | Private |
-|---|---|---|
-| folder, bookmark | parent, order | title, URL |
-| login | | origin |
-| login-field | parent, field name | value |
-| visit, tab | | everything |
-| setting | name | value |
+### What the app decides
 
-### Lists, objects and trees
+The protocol knows items and nothing else. How an app shapes its data is its own choice: one item
+per record, or a record split across several items, with or without parents. A few facts hold
+whatever it chooses:
 
-- **A list** is the items that name one parent, sorted by their order key, then by guid. Two
-  devices may give two items the same order key; both show, and any device may later give them
-  new keys as an ordinary edit. `synckosh.Between` makes a key between two others.
-- **An object** is the same, with the field's name as the key. When one key appears twice, the
-  datatype shows the newest, and a device may delete the other.
-- **A tree** is a list whose children can be parents. An item whose parents loop, or never reach
-  the top, is an orphan.
-- **A value that must never be lost,** such as a password, is never edited: each new value is a
-  new item under its parent, and the datatype shows the newest. Two devices changing it at once both
-  keep theirs.
+- **Newest wins per item.** Two devices editing the same item keep only the later edit; edits to
+  different items all survive. An app that needs two concurrent changes both kept puts them in
+  different items.
+- **A parent is just a field.** An item may name another item in its public part. Sync never
+  follows it. An item whose parent is missing, deleted or part of a loop is still alive, and the
+  app decides how to show it.
+- **Order is a field too.** Two devices can give two items the same order key. `synckosh.Between`
+  is an optional helper that makes a key between two others.
 
 ### Clearing a collection
 
@@ -113,6 +103,10 @@ Clearing history is one such item, not one delete per visit.
 ## Keys
 
 - **One data key per bucket** seals every private part. Devices keep it in the OS keychain.
+- **The data key is never shown.** It never leaves a device's key store: no export, no QR code,
+  no copy on screen. Anything a person sees, writes down or scans, such as a backup code or a QR
+  code to join a device, is a random passphrase with its own sealed copy, so it can be removed on
+  its own.
 - **Each passphrase seals its own copy** of the data key, as an item in the `keys` collection, datatype
   `sealed-key`. Its public part holds what a new device needs: the label, the data key's id, and
   the Argon2id settings and salt. Its private part is the data key sealed with XChaCha20-Poly1305
