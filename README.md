@@ -52,7 +52,7 @@ http.ListenAndServe(":8484", srv)
 ```
 
 `srv.ResetStore(bucket)` after any possible data loss, `srv.ResetAll()` after restoring the store
-from a backup, and `srv.Cleanup(90 * 24 * time.Hour)` now
+from a backup, and set `srv.CleanupAfter = 90 * 24 * time.Hour` before serving and run `srv.Cleanup()` now
 and then.
 
 ## Tests

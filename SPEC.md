@@ -286,7 +286,9 @@ by how much its clock is wrong.
 ### Pull
 
 The bucket's items with `sequence` greater than `after`, of every collection, lowest first, a page
-at a time: `{"store", "items": [...], "next": n, "more": bool}`. A page holds items up to the lower
+at a time: `{"store", "items": [...], "next": n, "more": bool, "time": ms, "cleanup": ms}`. `time` is
+the server's clock, and `cleanup` the age after which it removes deleted items, absent if it never
+does. A page holds items up to the lower
 of the server's page bytes and `bytes`, the most the device reads, but always at least one item. The
 device keeps `next` and passes it as `after` next time. A collection another device starts using
 just shows up. `collection=` limits a pull to one collection, for a device joining with a passphrase that
@@ -327,7 +329,18 @@ the one item a page always holds. Neither side's limits can stop the other's syn
 ### Cleanup
 
 The server removes items deleted more than a set time ago, such as 90 days. A device away longer
-than that may keep items that were deleted meanwhile.
+than that may hold items whose deletes were removed meanwhile, which no pull can bring it, so it
+starts over. It keeps the `time` of its last finished pull. The store id is checked first: on a
+new one the device refills, stale or not, as the server may have lost everything and this device
+may hold the only copy. Only when the store id is unchanged, and a pull answer's `time` is more
+than `cleanup` after the kept time, does the device start over: it removes every entry that isn't
+pending, resets its cursor, clears the kept time last, and syncs as a new device would. Its edits
+not yet sent go out as usual.
+
+A stale device that refills a reset server can bring back items deleted long ago, which is far
+better than losing the bucket; so can a device that went away in the middle of a refill. A server
+clock that jumps forward past the cleanup age makes every device start over, which costs
+bandwidth and nothing else.
 
 A device removes nothing because of the server's cleanup. One set to keep deleted items keeps them
 until the app removes those deleted, or before a cutoff, longer ago than an age it chooses.
@@ -337,14 +350,14 @@ until the app removes those deleted, or before a cutoff, longer ago than an age 
 1. Pull from the cursor, every collection at once. Take each item, unless this device's version has
    a later timestamp.
 2. If the store id changed, refill: mark everything pending, store id last, and start again from
-   the beginning.
+   the beginning. Otherwise, if this device is away longer than the cleanup age, start over.
 3. Push everything changed here. For each `current` that comes back, take it.
 4. If a push's sequence numbers start just after the cursor, nothing else reached the server in
    between, so move the cursor to the last of them: the device doesn't pull its own items back.
    Otherwise leave the cursor, and the next pull brings what came in between, with these items.
    Results with no sequence number don't count.
 5. Keep going past refused items, and report them: they stay pending.
-6. Keep the clock, the store id and the cursor.
+6. Keep the clock, the store id, the cursor and the time of the last finished pull.
 
 ## Staying compatible
 

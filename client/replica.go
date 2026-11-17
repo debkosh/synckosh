@@ -496,8 +496,8 @@ func (r *Replica) Sync(ctx context.Context) error {
 }
 
 // checkStore compares the server's store id with the one this device last synced with. On a
-// new one, the server may have lost data, so the device refills it. The store id is saved last:
-// a crash anywhere before repeats the refill.
+// new one, the server may have lost data, so the device refills it, even when it is stale: it may
+// hold the only copy. The store id is saved last: a crash anywhere before repeats the refill.
 func (r *Replica) checkStore(id string) (bool, error) {
 	old, err := r.local.Meta("store")
 	if err != nil {
@@ -532,7 +532,10 @@ func (r *Replica) refill() error {
 	if err := r.local.Put(all...); err != nil {
 		return err
 	}
-	return r.setCursor(0)
+	if err := r.setCursor(0); err != nil {
+		return err
+	}
+	return r.local.SetMeta("pulled", nil) // a refill reads from the start, stale or not
 }
 
 // The cursor is the sequence number of the last item this device has from the server.
@@ -611,6 +614,17 @@ func (r *Replica) pull(ctx context.Context, rp *report) (restart bool, err error
 			restart, after = true, 0
 			continue
 		}
+		stale, err := r.stale(p)
+		if err != nil {
+			return false, err
+		}
+		if stale {
+			if err := r.startOver(); err != nil {
+				return false, err
+			}
+			after = 0
+			continue
+		}
 		var ch changes
 		for _, it := range p.Items {
 			if err := r.take(it, rp, &ch); err != nil {
@@ -625,9 +639,49 @@ func (r *Replica) pull(ctx context.Context, rp *report) (restart bool, err error
 			return false, err
 		}
 		if !p.More {
-			return restart, nil
+			b, _ := json.Marshal(p.Time)
+			return restart, r.local.SetMeta("pulled", b)
 		}
 	}
+}
+
+// stale says whether this device last finished a pull longer ago than the server keeps deleted
+// items: it may hold items whose deletes were cleaned up since, which no pull can bring.
+func (r *Replica) stale(p synckosh.Page) (bool, error) {
+	b, err := r.local.Meta("pulled")
+	if err != nil || b == nil || p.Cleanup <= 0 {
+		return false, err
+	}
+	var pulled int64
+	if err := json.Unmarshal(b, &pulled); err != nil {
+		return false, fmt.Errorf("pulled: %w", err)
+	}
+	return p.Time-pulled > p.Cleanup, nil
+}
+
+// startOver makes a stale device a new one, but for its edits not yet sent: it removes every
+// entry that isn't pending and reads from the start. The kept pull time is cleared last, so a
+// crash before repeats it.
+func (r *Replica) startOver() error {
+	gone := map[string][]string{}
+	err := r.local.Each("", func(e Entry) error {
+		if !e.Pending {
+			gone[e.Item.Collection] = append(gone[e.Item.Collection], e.Item.GUID)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	for collection, guids := range gone {
+		if err := r.local.Remove(collection, guids...); err != nil {
+			return err
+		}
+	}
+	if err := r.setCursor(0); err != nil {
+		return err
+	}
+	return r.local.SetMeta("pulled", nil)
 }
 
 // take decides what an item from the server does here: it is taken, unless this device has a

@@ -27,12 +27,15 @@ type Pushed struct {
 	Results []Result `json:"results"`
 }
 
-// Page is one page of a pull.
+// Page is one page of a pull. Time is the server's clock, and Cleanup the age after which it
+// removes deleted items, both in milliseconds; Cleanup is 0 if it never does.
 type Page struct {
-	Store string `json:"store"`
-	Items []Item `json:"items"`
-	Next  uint64 `json:"next"`
-	More  bool   `json:"more"`
+	Store   string `json:"store"`
+	Items   []Item `json:"items"`
+	Next    uint64 `json:"next"`
+	More    bool   `json:"more"`
+	Time    int64  `json:"time"`
+	Cleanup int64  `json:"cleanup,omitempty"`
 }
 
 // Why the server refused a pushed item, in a push result's "code".

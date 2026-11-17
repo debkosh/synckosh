@@ -29,7 +29,7 @@ func putMany(t *testing.T, d *device, n, size int) {
 // items of 300 KB and 40 near 1 MB, against pushes and pages of 16 MB.
 func TestSyncByBytes(t *testing.T) {
 	limits := synckosh.Limits{ItemBytes: 64 << 10, PushBytes: 1 << 20, PageBytes: 1 << 20}
-	e := newEnv(t, limits)
+	e := newEnv(t, withLimits(limits))
 	mac, macNet := e.flakyDevice("mac", client.Config{Limits: limits})
 	phone, phoneNet := e.flakyDevice("phone", client.Config{Limits: limits})
 	putMany(t, mac, 60, 300<<10/16)
@@ -51,7 +51,7 @@ func TestSyncByBytes(t *testing.T) {
 // its limits, and the device splits it and carries on; a device with a smaller page gets smaller
 // pages.
 func TestLimitsDifferOnEachSide(t *testing.T) {
-	e := newEnv(t, synckosh.Limits{PushItems: 7, PushBytes: 20 << 10})
+	e := newEnv(t, withLimits(synckosh.Limits{PushItems: 7, PushBytes: 20 << 10}))
 	mac, macNet := e.flakyDevice("mac", client.Config{})
 	phone, phoneNet := e.flakyDevice("phone", client.Config{Limits: synckosh.Limits{PageBytes: 8 << 10}})
 	putMany(t, mac, 50, 1000)
@@ -70,7 +70,7 @@ func TestLimitsDifferOnEachSide(t *testing.T) {
 // An item over the server's item limit is refused, stays pending and is reported; the rest
 // syncs.
 func TestAnItemOverTheServersLimit(t *testing.T) {
-	e := newEnv(t, synckosh.Limits{ItemBytes: 4 << 10})
+	e := newEnv(t, withLimits(synckosh.Limits{ItemBytes: 4 << 10}))
 	mac := e.device("mac")
 	big := put(t, mac, note(8<<10))
 	small := put(t, mac, note(10))

@@ -60,6 +60,9 @@ type Auth func(r *http.Request) (bucket string, err error)
 type Server struct {
 	// Limits are this server's; zero fields take synckosh.DefaultLimits. Set them before serving.
 	Limits synckosh.Limits
+	// CleanupAfter is how long Cleanup keeps deleted items; 0 means they are kept for good. Pull
+	// answers carry it, so a device away longer starts over. Set it before serving.
+	CleanupAfter time.Duration
 
 	store Store
 	auth  Auth
@@ -91,9 +94,13 @@ func (s *Server) ResetStore(bucket string) error {
 // store from a backup.
 func (s *Server) ResetAll() error { return s.store.ResetAll() }
 
-// Cleanup removes items deleted more than age ago.
-func (s *Server) Cleanup(age time.Duration) (int, error) {
-	return s.store.Cleanup(s.now().Add(-age).UnixMilli())
+// Cleanup removes items deleted more than CleanupAfter ago, and returns how many. The host runs
+// it now and then.
+func (s *Server) Cleanup() (int, error) {
+	if s.CleanupAfter <= 0 {
+		return 0, nil
+	}
+	return s.store.Cleanup(s.now().Add(-s.CleanupAfter).UnixMilli())
 }
 
 // reply writes JSON without Go's escaping of <, > and &, so a part goes out as it came in.
@@ -330,7 +337,8 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
 		internal(w, r, err)
 		return
 	}
-	p := synckosh.Page{Store: id, Items: []synckosh.Item{}, Next: after}
+	p := synckosh.Page{Store: id, Items: []synckosh.Item{}, Next: after, Time: s.now().UnixMilli(),
+		Cleanup: s.CleanupAfter.Milliseconds()}
 	size := 0
 	var bad error
 	err = s.store.Since(bucket, collection, after, func(it synckosh.Item) bool {

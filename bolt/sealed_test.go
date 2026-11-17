@@ -283,6 +283,9 @@ func (e *env) newServer() *Store {
 	}
 	e.t.Cleanup(func() { st.Close() })
 	e.srv = server.New(st, auth)
+	for _, o := range e.opts {
+		o(e.srv)
+	}
 	ts := httptest.NewServer(e.srv)
 	e.t.Cleanup(ts.Close)
 	e.url, e.store = ts.URL, st

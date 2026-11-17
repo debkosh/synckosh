@@ -42,10 +42,19 @@ type env struct {
 	store *Store
 	dir   string
 	key   *synckosh.DataKey
+	opts  []func(*server.Server)
 }
 
-// newEnv starts a server, with limits if given, and makes the bucket's key.
-func newEnv(t *testing.T, limits ...synckosh.Limits) *env {
+func withLimits(l synckosh.Limits) func(*server.Server) {
+	return func(s *server.Server) { s.Limits = l }
+}
+
+func cleanupAfter(d time.Duration) func(*server.Server) {
+	return func(s *server.Server) { s.CleanupAfter = d }
+}
+
+// newEnv starts a server, set up by opts before it serves, and makes the bucket's key.
+func newEnv(t *testing.T, opts ...func(*server.Server)) *env {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := OpenStore(filepath.Join(dir, "server.db"))
@@ -53,8 +62,8 @@ func newEnv(t *testing.T, limits ...synckosh.Limits) *env {
 		t.Fatal(err)
 	}
 	srv := server.New(st, auth)
-	if len(limits) > 0 {
-		srv.Limits = limits[0]
+	for _, o := range opts {
+		o(srv)
 	}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
@@ -62,7 +71,7 @@ func newEnv(t *testing.T, limits ...synckosh.Limits) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &env{t: t, url: ts.URL, srv: srv, store: st, dir: dir, key: key}
+	return &env{t: t, url: ts.URL, srv: srv, store: st, dir: dir, key: key, opts: opts}
 }
 
 type device struct {
@@ -433,17 +442,18 @@ func TestServerChecks(t *testing.T) {
 }
 
 func TestCleanup(t *testing.T) {
-	e := newEnv(t)
+	e := newEnv(t, cleanupAfter(50*time.Millisecond))
 	mac := e.device("mac")
 	b := put(t, mac, bookmark("root", "Go"))
 	keep := put(t, mac, bookmark("root", "Keep"))
 	sync(t, mac)
 	mac.Delete("bookmarks", b.GUID)
 	sync(t, mac)
-	if n, err := e.srv.Cleanup(time.Hour); err != nil || n != 0 {
+	if n, err := e.srv.Cleanup(); err != nil || n != 0 {
 		t.Fatalf("cleaned a fresh delete: %d %v", n, err)
 	}
-	if n, err := e.srv.Cleanup(-time.Minute); err != nil || n != 1 {
+	time.Sleep(60 * time.Millisecond)
+	if n, err := e.srv.Cleanup(); err != nil || n != 1 {
 		t.Fatalf("cleanup: %d %v", n, err)
 	}
 	if _, has := stored(t, e.store, "bookmarks", b.GUID); has {

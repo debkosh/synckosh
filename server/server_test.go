@@ -211,11 +211,13 @@ func TestSameGUIDTwiceInOnePush(t *testing.T) {
 // higher one, so no device's cursor is passed over.
 func TestCleanupNeverReusesANumber(t *testing.T) {
 	srv := server.New(openStore(t), auth)
+	srv.CleanupAfter = time.Millisecond
 	c := serve(t, srv)
 	gone := note("gone")
 	gone.Deleted = true
 	c.Push(context.Background(), []synckosh.Item{note("kept"), gone})
-	if n, err := srv.Cleanup(-time.Minute); err != nil || n != 1 {
+	time.Sleep(5 * time.Millisecond)
+	if n, err := srv.Cleanup(); err != nil || n != 1 {
 		t.Fatalf("cleanup: %d %v", n, err)
 	}
 	res, err := c.Push(context.Background(), []synckosh.Item{note("next")})
