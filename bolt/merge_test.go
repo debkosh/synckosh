@@ -69,14 +69,20 @@ func tags(t *testing.T, d *device) string {
 
 // flaky is a device's connection: before runs once just before its next push, as if other
 // devices synced then, and with drop the next push reaches the server but its answer is lost.
+// It counts the pushes and pulls it carries.
 type flaky struct {
 	signedIn
-	before func()
-	drop   bool
+	before        func()
+	drop          bool
+	pushes, pulls int
 }
 
 func (f *flaky) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodGet {
+		f.pulls++
+	}
 	if r.Method == http.MethodPost {
+		f.pushes++
 		if b := f.before; b != nil {
 			f.before = nil
 			b()

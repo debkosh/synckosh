@@ -599,7 +599,7 @@ func (r *Replica) pull(ctx context.Context, rp *report) (restart bool, err error
 		return false, err
 	}
 	for {
-		p, err := r.c.Pull(ctx, "", after)
+		p, err := r.c.Pull(ctx, "", after, r.limits.PageBytes)
 		if err != nil {
 			return false, err
 		}
@@ -723,7 +723,8 @@ func sameJSON(a, b json.RawMessage) bool {
 	return bytes.Equal(ca.Bytes(), cb.Bytes())
 }
 
-// push sends what changed here, as many items at a time as the limits allow. When a push's
+// push sends what changed here, as many items at a time as the limits allow, this device's and,
+// once it has refused a push as too large, the server's. When a push's
 // sequence numbers follow straight on from the cursor, nothing else reached the server in
 // between, so the cursor moves past them and this device doesn't pull its own items back.
 // Otherwise the next pull brings what came in between, and these items with it.
@@ -738,23 +739,39 @@ func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error
 		return false, err
 	}
 	for len(pending) > 0 {
-		n := min(len(pending), r.limits.PushItems)
-		batch := pending[:n]
-		pending = pending[n:]
-		out := make([]synckosh.Item, n)
-		for i := range batch {
-			if out[i], err = r.seal(batch[i].Item); err != nil {
+		var out []synckosh.Item
+		size := len(`{"items":[]}`)
+		for len(out) < len(pending) && len(out) < r.limits.PushItems {
+			sealed, err := r.seal(pending[len(out)].Item)
+			if err != nil {
 				return false, err
 			}
+			b, err := synckosh.Marshal(sealed)
+			if err != nil {
+				return false, err
+			}
+			if len(out) > 0 && size+len(b)+1 > r.limits.PushBytes {
+				break
+			}
+			size += len(b) + 1
+			out = append(out, sealed)
+		}
+		batch := pending[:len(out)]
+		for i := range batch {
 			batch[i].Sent = batch[i].Item.Timestamp
 		}
 		if err := r.local.Put(batch...); err != nil {
 			return false, err
 		}
 		res, err := r.c.Push(ctx, out)
+		var tooLarge *TooLargeError
+		if errors.As(err, &tooLarge) && r.fit(tooLarge.Limits) {
+			continue // split to fit, and carry on
+		}
 		if err != nil {
 			return false, err
 		}
+		pending = pending[len(out):]
 		changed, err := r.checkStore(res.Store)
 		if err != nil {
 			return false, err
@@ -811,13 +828,28 @@ func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error
 	return false, nil
 }
 
+// fit lowers this device's push limits to the server's, and says whether that changed them: if
+// not, splitting can't help.
+func (r *Replica) fit(server synckosh.Limits) bool {
+	l := r.limits
+	if server.PushItems > 0 {
+		l.PushItems = min(l.PushItems, server.PushItems)
+	}
+	if server.PushBytes > 0 {
+		l.PushBytes = min(l.PushBytes, server.PushBytes)
+	}
+	changed := l != r.limits
+	r.limits = l
+	return changed
+}
+
 // Join returns a bucket's data key, opened with one of its passphrases, for the device to keep
 // in its own key store. It reads the bucket's sealed copies and takes the first that opens and
 // whose own seal checks out under the key it holds.
 func Join(ctx context.Context, c *Client, passphrase string) (*synckosh.DataKey, error) {
 	var after uint64
 	for {
-		p, err := c.Pull(ctx, synckosh.KeysCollection, after)
+		p, err := c.Pull(ctx, synckosh.KeysCollection, after, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -845,7 +877,7 @@ var ErrHasKey = errors.New("the bucket already holds items: join it with a passp
 // the bucket holds any item at all, so two first runs don't make two keys; two at the very same
 // moment still can, and then each device sees the other's items as locked until one joins.
 func Create(ctx context.Context, c *Client, passphrase, label string) (*synckosh.DataKey, error) {
-	p, err := c.Pull(ctx, "", 0)
+	p, err := c.Pull(ctx, "", 0, 0)
 	if err != nil {
 		return nil, err
 	}

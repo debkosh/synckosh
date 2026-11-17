@@ -86,16 +86,60 @@ func TestPushRefusesBadItems(t *testing.T) {
 	}
 }
 
-func TestPushOverTheItemCountIsRefused(t *testing.T) {
+// A push over the server's limits is refused whole, with the limits, so the device can split it.
+func TestAPushOverTheLimitsIsRefusedWithThem(t *testing.T) {
 	srv := server.New(openStore(t), auth)
-	srv.Limits.PushItems = 2
+	srv.Limits.PushItems, srv.Limits.PushBytes = 2, 1000
 	c := serve(t, srv)
 	its := make([]synckosh.Item, 3)
 	for i := range its {
 		its[i] = synckosh.Item{Collection: "notes", Datatype: "note", GUID: synckosh.NewGUID(), Timestamp: time.Now().UnixMilli()}
 	}
-	if _, err := c.Push(context.Background(), its); err == nil || !strings.Contains(err.Error(), "413") {
+	var tooLarge *client.TooLargeError
+	if _, err := c.Push(context.Background(), its); !errors.As(err, &tooLarge) || tooLarge.Limits.PushItems != 2 {
 		t.Fatalf("three items to a server that takes two: %v", err)
+	}
+	big := its[:1]
+	big[0].Public = []byte(`"` + strings.Repeat("x", 1000) + `"`)
+	if _, err := c.Push(context.Background(), big); !errors.As(err, &tooLarge) || tooLarge.Limits.PushBytes != 1000 {
+		t.Fatalf("a push over the server's bytes: %v", err)
+	}
+}
+
+// A page stops at the bytes the device asks for, or the server's limit, but holds at least one
+// item, and the pages together hold everything once.
+func TestPagesStopAtTheirBytes(t *testing.T) {
+	srv := server.New(openStore(t), auth)
+	srv.Limits.PageBytes = 3000
+	c := serve(t, srv)
+	its := make([]synckosh.Item, 10)
+	for i := range its {
+		its[i] = note(synckosh.NewGUID())
+		its[i].Public = []byte(`"` + strings.Repeat("x", 900) + `"`)
+	}
+	if _, err := c.Push(context.Background(), its); err != nil {
+		t.Fatal(err)
+	}
+	for _, c2 := range []struct{ ask, perPage int }{{0, 3}, {2000, 2}, {10, 1}} {
+		var after uint64
+		got := 0
+		for {
+			p, err := c.Pull(context.Background(), "", after, c2.ask)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(p.Items) > c2.perPage || len(p.Items) == 0 {
+				t.Fatalf("asking for %d bytes: a page of %d items", c2.ask, len(p.Items))
+			}
+			got += len(p.Items)
+			after = p.Next
+			if !p.More {
+				break
+			}
+		}
+		if got != len(its) {
+			t.Fatalf("asking for %d bytes: %d items in all, want %d", c2.ask, got, len(its))
+		}
 	}
 }
 
@@ -157,7 +201,7 @@ func TestSameGUIDTwiceInOnePush(t *testing.T) {
 	if err != nil || !res.Results[0].OK || !res.Results[1].OK || res.Results[1].Sequence != res.Results[0].Sequence+1 {
 		t.Fatalf("%v %+v", err, res)
 	}
-	p, _ := c.Pull(context.Background(), "", 0)
+	p, _ := c.Pull(context.Background(), "", 0, 0)
 	if len(p.Items) != 1 || string(p.Items[0].Public) != `{"v":2}` || p.Items[0].Sequence != 2 {
 		t.Fatalf("want the second, as sequence 2: %+v", p.Items)
 	}

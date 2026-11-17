@@ -47,15 +47,17 @@ const (
 )
 
 // Limits bound what one request carries. The server and each device set their own; a zero
-// field means the default in DefaultLimits.
+// field means the default in DefaultLimits. A server that refuses a push as too large answers
+// with its limits, and the device splits the push to fit.
 type Limits struct {
-	ItemBytes int // one item as JSON on the wire, sealed
-	PushItems int // items in one push
-	PushBytes int // one push request's body
+	ItemBytes int `json:"item_bytes"` // one item as JSON on the wire, sealed
+	PushItems int `json:"push_items"` // items in one push
+	PushBytes int `json:"push_bytes"` // one push request's body
+	PageBytes int `json:"page_bytes"` // the items of one pull page, but always at least one item
 }
 
 // DefaultLimits are the limits a side uses unless it sets its own.
-var DefaultLimits = Limits{ItemBytes: 1 << 20, PushItems: 1000, PushBytes: 16 << 20}
+var DefaultLimits = Limits{ItemBytes: 1 << 20, PushItems: 1000, PushBytes: 16 << 20, PageBytes: 16 << 20}
 
 // OrDefaults returns the limits with every zero field set to its default.
 func (l Limits) OrDefaults() Limits {
@@ -68,6 +70,9 @@ func (l Limits) OrDefaults() Limits {
 	}
 	if l.PushBytes == 0 {
 		l.PushBytes = d.PushBytes
+	}
+	if l.PageBytes == 0 {
+		l.PageBytes = d.PageBytes
 	}
 	return l
 }

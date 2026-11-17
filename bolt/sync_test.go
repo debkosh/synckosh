@@ -44,7 +44,8 @@ type env struct {
 	key   *synckosh.DataKey
 }
 
-func newEnv(t *testing.T) *env {
+// newEnv starts a server, with limits if given, and makes the bucket's key.
+func newEnv(t *testing.T, limits ...synckosh.Limits) *env {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := OpenStore(filepath.Join(dir, "server.db"))
@@ -52,6 +53,9 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	srv := server.New(st, auth)
+	if len(limits) > 0 {
+		srv.Limits = limits[0]
+	}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 	key, err := synckosh.NewDataKey()
@@ -400,7 +404,7 @@ func TestServerChecks(t *testing.T) {
 			t.Fatalf("push %d: %v %+v", i, err, res)
 		}
 	}
-	p, _ := c.Pull(ctx, "settings", 0)
+	p, _ := c.Pull(ctx, "settings", 0, 0)
 	if len(p.Items) != 1 || p.Items[0].Sequence != 2 {
 		t.Fatalf("a retried push: want one item, stored again as sequence 2: %+v", p)
 	}
@@ -420,10 +424,10 @@ func TestServerChecks(t *testing.T) {
 		t.Fatalf("a timestamp two days ahead: %+v %d", r, res.Time)
 	}
 	anon := &client.Client{URL: e.url}
-	if _, err := anon.Pull(ctx, "settings", 0); err == nil {
+	if _, err := anon.Pull(ctx, "settings", 0, 0); err == nil {
 		t.Fatal("pulled without signing in")
 	}
-	if p, _ := other.Pull(ctx, "", 0); len(p.Items) != 3 {
+	if p, _ := other.Pull(ctx, "", 0, 0); len(p.Items) != 3 {
 		t.Fatalf("another bucket sees my items: %d", len(p.Items))
 	}
 }

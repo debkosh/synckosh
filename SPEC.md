@@ -252,7 +252,7 @@ belongs to, and every bucket's items are apart.
 |---|---|
 | `GET /v1` | `{"version": 1}` |
 | `POST /v1/push` `{"items": [...]}` | push, below |
-| `GET /v1/pull?after=&collection=` | pull, below |
+| `GET /v1/pull?after=&collection=&bytes=` | pull, below |
 
 Every answer to push and pull carries `store`: the bucket's store id.
 
@@ -275,6 +275,10 @@ back, even when cleanup removes the item that had the highest number. For each i
   `timestamp-ahead` (more than an hour ahead of the server's clock), `too-big` (over the server's
   item limit) or `invalid`; the error says what, for a person.
 
+A push over the server's item count or bytes is refused whole, with status 413 and
+`{"error": "...", "limits": {"item_bytes", "push_items", "push_bytes", "page_bytes"}}`. The device
+then fills its pushes to the lower of its limits and the server's, and carries on.
+
 The answer is `{"store", "time", "results": [...]}`, with one result per item in the order sent.
 `time` is the server's clock in milliseconds, so a device refused for `timestamp-ahead` can say
 by how much its clock is wrong.
@@ -282,7 +286,8 @@ by how much its clock is wrong.
 ### Pull
 
 The bucket's items with `sequence` greater than `after`, of every collection, lowest first, a page
-at a time: `{"store", "items": [...], "next": n, "more": bool}`. The
+at a time: `{"store", "items": [...], "next": n, "more": bool}`. A page holds items up to the lower
+of the server's page bytes and `bytes`, the most the device reads, but always at least one item. The
 device keeps `next` and passes it as `after` next time. A collection another device starts using
 just shows up. `collection=` limits a pull to one collection, for a device joining with a passphrase that
 reads only `_sealedkeys` first.
@@ -312,8 +317,12 @@ Each side sets its own limits. The defaults:
 | one item, as sealed JSON on the wire | 1 MiB |
 | items in one push | 1000 |
 | bytes in one push request | 16 MiB |
+| bytes of items in one pull page | 16 MiB |
 
 A device refuses an edit over its own item limit when it is made, rather than leave it pending.
+The server refuses an item over its item limit as `too-big`; it stays pending and is reported. A
+device fills each push by its item count and bytes, and reads a page up to its page bytes, plus
+the one item a page always holds. Neither side's limits can stop the other's sync.
 
 ### Cleanup
 

@@ -7,6 +7,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -53,9 +54,6 @@ type Tx interface {
 
 // Auth tells the server which bucket a request is for. It returns an error to refuse it.
 type Auth func(r *http.Request) (bucket string, err error)
-
-// pageSize is the most items one pull answer holds.
-const pageSize = 500
 
 // Server serves the protocol. Each push is one Update of its bucket, which hands out the
 // bucket's sequence numbers in the order its items are stored, with no gaps within one push.
@@ -159,15 +157,24 @@ type pushRequest struct {
 	Items []json.RawMessage `json:"items"`
 }
 
+// tooLarge refuses a whole push, telling the device the server's limits so it can split it.
+func tooLarge(w http.ResponseWriter, limits synckosh.Limits, msg string) {
+	reply(w, http.StatusRequestEntityTooLarge, map[string]any{"error": msg, "limits": limits})
+}
+
 func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
+	limits := s.Limits.OrDefaults()
 	var req pushRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if tooBig := (*http.MaxBytesError)(nil); errors.As(err, &tooBig) {
+			tooLarge(w, limits, fmt.Sprintf("more than %d bytes in one push", limits.PushBytes))
+			return
+		}
 		fail(w, http.StatusBadRequest, `body: {"items": [...]}: `+err.Error())
 		return
 	}
-	limits := s.Limits.OrDefaults()
 	if len(req.Items) > limits.PushItems {
-		fail(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("more than %d items in one push", limits.PushItems))
+		tooLarge(w, limits, fmt.Sprintf("more than %d items in one push", limits.PushItems))
 		return
 	}
 	in := make([]synckosh.Item, len(req.Items))
@@ -309,21 +316,41 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
 		}
 		after = n
 	}
+	most := s.Limits.OrDefaults().PageBytes
+	if v := q.Get("bytes"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			fail(w, http.StatusBadRequest, "bytes: the most the device reads in one page")
+			return
+		}
+		most = min(most, n)
+	}
 	id, err := s.store.StoreID(bucket)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
 	p := synckosh.Page{Store: id, Items: []synckosh.Item{}, Next: after}
+	size := 0
+	var bad error
 	err = s.store.Since(bucket, collection, after, func(it synckosh.Item) bool {
-		if len(p.Items) == pageSize {
+		b, err := synckosh.Marshal(it)
+		if err != nil {
+			bad = err
+			return false
+		}
+		if len(p.Items) > 0 && size+len(b)+1 > most {
 			p.More = true
 			return false
 		}
+		size += len(b) + 1
 		p.Items = append(p.Items, it)
 		p.Next = it.Sequence
 		return true
 	})
+	if err == nil {
+		err = bad
+	}
 	if err != nil {
 		internal(w, r, err)
 		return
