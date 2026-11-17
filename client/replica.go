@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/sudiptadeb/synckosh"
 )
@@ -21,9 +22,10 @@ type Entry struct {
 type Local interface {
 	Get(bucket, guid string) (Entry, bool, error)
 	Put(entries ...Entry) error
-	// Each calls fn for every entry of a bucket, in guid order.
+	// Each calls fn for every entry of a bucket, or of every bucket if bucket is empty.
 	Each(bucket string, fn func(Entry) error) error
-	Pending(bucket string) ([]Entry, error)
+	// Pending returns the entries of every bucket that the server doesn't have yet.
+	Pending() ([]Entry, error)
 	Meta(key string) ([]byte, error) // nil if unset
 	SetMeta(key string, value []byte) error
 }
@@ -32,12 +34,12 @@ type Local interface {
 // it is gone. Clearing history is one such item, not one delete per visit.
 const ClearType = "sync.clear"
 
-// Config is what a Replica needs.
+// Config is what a Replica needs. It syncs every bucket: one the app or another device starts
+// using needs no setup.
 type Config struct {
-	Client  *Client
-	Local   Local
-	Key     *synckosh.DataKey
-	Buckets []string // the buckets this device syncs
+	Client *Client
+	Local  Local
+	Key    *synckosh.DataKey
 }
 
 // Replica is one device's copy of an account. Its methods may be called from any goroutine,
@@ -48,13 +50,11 @@ type Replica struct {
 	local Local
 	key   *synckosh.DataKey
 	clock *synckosh.Clock
-	bkts  []string
 }
 
 // Open opens a device's replica, with its clock where it left off.
 func Open(cfg Config) (*Replica, error) {
-	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, clock: synckosh.NewClock(),
-		bkts: append([]string(nil), cfg.Buckets...)}
+	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, clock: synckosh.NewClock()}
 	b, err := r.local.Meta("clock")
 	if err != nil {
 		return nil, err
@@ -170,21 +170,46 @@ func (r *Replica) Items(bucket string) ([]synckosh.Item, error) {
 // changed its store id.
 const maxRounds = 5
 
-// Sync pulls every bucket, then pushes what changed here. If the server's store id has changed
+// Refused is a pushed item the server refused. It stays pending, and goes out again on the
+// next Sync.
+type Refused struct {
+	Bucket, GUID string
+	Code         string // one of synckosh.Refused...
+	Error        string
+}
+
+// RefusedError is what Sync returns when the server refused some items. Everything else was
+// synced. When the code is synckosh.RefusedTimestampAhead, this device's clock is wrong: the
+// app can tell the user by how much with Ahead. Once the clock is right, the next Sync sends
+// those items with a new timestamp.
+type RefusedError struct {
+	Items []Refused
+	Ahead time.Duration // how far the refused timestamps were ahead of the server's clock
+}
+
+func (e *RefusedError) Error() string {
+	for _, it := range e.Items {
+		if it.Code == synckosh.RefusedTimestampAhead {
+			return fmt.Sprintf("sync: the server refused %d items: this device's clock is %s ahead of the server's",
+				len(e.Items), e.Ahead.Round(time.Minute))
+		}
+	}
+	return fmt.Sprintf("sync: the server refused %d items: %s %s: %s", len(e.Items),
+		e.Items[0].Bucket, e.Items[0].GUID, e.Items[0].Error)
+}
+
+// Sync pulls what is new, then pushes what changed here. If the server's store id has changed
 // since this device last synced, the server may have lost data, so the device pushes all it has.
+// If the server refused some items, Sync syncs the rest and returns a *RefusedError.
 func (r *Replica) Sync(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for round := 0; round < maxRounds; round++ {
-		again := false
-		for _, b := range r.bkts {
-			restart, err := r.pull(ctx, b)
-			if err != nil {
-				return err
-			}
-			again = again || restart
+		again, err := r.pull(ctx)
+		if err != nil {
+			return err
 		}
-		restart, err := r.push(ctx)
+		restart, refused, err := r.push(ctx)
 		if err != nil {
 			return err
 		}
@@ -192,6 +217,9 @@ func (r *Replica) Sync(ctx context.Context) error {
 			return err
 		}
 		if !again && !restart {
+			if refused != nil {
+				return refused
+			}
 			return nil
 		}
 	}
@@ -199,7 +227,7 @@ func (r *Replica) Sync(ctx context.Context) error {
 }
 
 // checkStore compares the server's store id with the one this device last synced with. On a
-// new one, it marks everything here pending and reads every bucket from the start.
+// new one, it marks everything here pending and reads from the start.
 func (r *Replica) checkStore(id string) (bool, error) {
 	old, err := r.local.Meta("store")
 	if err != nil {
@@ -214,27 +242,23 @@ func (r *Replica) checkStore(id string) (bool, error) {
 	if old == nil {
 		return false, nil // the first sync
 	}
-	for _, b := range r.bkts {
-		var all []Entry
-		if err := r.local.Each(b, func(e Entry) error {
-			e.Pending = true
-			all = append(all, e)
-			return nil
-		}); err != nil {
-			return false, err
-		}
-		if err := r.local.Put(all...); err != nil {
-			return false, err
-		}
-		if err := r.local.SetMeta("after:"+b, nil); err != nil {
-			return false, err
-		}
+	var all []Entry
+	if err := r.local.Each("", func(e Entry) error {
+		e.Pending = true
+		all = append(all, e)
+		return nil
+	}); err != nil {
+		return false, err
 	}
-	return true, nil
+	if err := r.local.Put(all...); err != nil {
+		return false, err
+	}
+	return true, r.setCursor(0)
 }
 
-func (r *Replica) cursor(bucket string) (uint64, error) {
-	b, err := r.local.Meta("after:" + bucket)
+// The cursor is the sequence number of the last item this device has from the server.
+func (r *Replica) cursor() (uint64, error) {
+	b, err := r.local.Meta("after")
 	if err != nil || b == nil {
 		return 0, err
 	}
@@ -243,13 +267,18 @@ func (r *Replica) cursor(bucket string) (uint64, error) {
 	return n, err
 }
 
-func (r *Replica) pull(ctx context.Context, bucket string) (restart bool, err error) {
-	after, err := r.cursor(bucket)
+func (r *Replica) setCursor(n uint64) error {
+	b, _ := json.Marshal(n)
+	return r.local.SetMeta("after", b)
+}
+
+func (r *Replica) pull(ctx context.Context) (restart bool, err error) {
+	after, err := r.cursor()
 	if err != nil {
 		return false, err
 	}
 	for {
-		p, err := r.c.Pull(ctx, bucket, after)
+		p, err := r.c.Pull(ctx, "", after)
 		if err != nil {
 			return false, err
 		}
@@ -275,8 +304,7 @@ func (r *Replica) pull(ctx context.Context, bucket string) (restart bool, err er
 			return false, err
 		}
 		after = p.Next
-		b, _ := json.Marshal(after)
-		if err := r.local.SetMeta("after:"+bucket, b); err != nil {
+		if err := r.setCursor(after); err != nil {
 			return false, err
 		}
 		if !p.More {
@@ -304,16 +332,20 @@ func (r *Replica) take(remote synckosh.Item) (Entry, bool, error) {
 	return Entry{Item: remote}, true, nil
 }
 
-func (r *Replica) push(ctx context.Context) (restart bool, err error) {
-	var pending []Entry
-	for _, b := range r.bkts {
-		p, err := r.local.Pending(b)
-		if err != nil {
-			return false, err
-		}
-		pending = append(pending, p...)
+// push sends what changed here, 1000 items at a time. When a push's sequence numbers follow
+// straight on from the cursor, nothing else reached the server in between, so the cursor moves
+// past them and this device doesn't pull its own items back. Otherwise the next pull brings
+// what came in between, and these items with it.
+func (r *Replica) push(ctx context.Context) (restart bool, refused *RefusedError, err error) {
+	pending, err := r.local.Pending()
+	if err != nil {
+		return false, nil, err
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].Item.Timestamp < pending[j].Item.Timestamp })
+	cur, err := r.cursor()
+	if err != nil {
+		return false, nil, err
+	}
 	for len(pending) > 0 {
 		n := min(len(pending), 1000)
 		batch := pending[:n]
@@ -321,43 +353,67 @@ func (r *Replica) push(ctx context.Context) (restart bool, err error) {
 		out := make([]synckosh.Item, n)
 		for i, e := range batch {
 			if out[i], err = r.key.Seal(e.Item); err != nil {
-				return false, err
+				return false, nil, err
 			}
 		}
 		res, err := r.c.Push(ctx, out)
 		if err != nil {
-			return false, err
+			return false, nil, err
 		}
 		changed, err := r.checkStore(res.Store)
 		if err != nil {
-			return false, err
+			return false, nil, err
 		}
 		if changed {
-			return true, nil
+			return true, nil, nil
 		}
 		var es []Entry
+		var lo, hi uint64
 		for i, rs := range res.Results {
 			switch {
 			case rs.OK:
 				e := batch[i]
 				e.Item.Sequence, e.Pending = rs.Sequence, false
 				es = append(es, e)
+				if lo == 0 || rs.Sequence < lo {
+					lo = rs.Sequence
+				}
+				hi = max(hi, rs.Sequence)
 			case rs.Current != nil:
 				// The server holds a later version: it wins, here too.
 				e, ok, err := r.take(*rs.Current)
 				if err != nil {
-					return false, err
+					return false, nil, err
 				}
 				if ok {
 					es = append(es, e)
 				}
 			default:
-				return false, fmt.Errorf("push %s %s: %s", batch[i].Item.Bucket, batch[i].Item.GUID, rs.Error)
+				if refused == nil {
+					refused = &RefusedError{}
+				}
+				it := batch[i].Item
+				refused.Items = append(refused.Items, Refused{it.Bucket, it.GUID, rs.Code, rs.Error})
+				if rs.Code == synckosh.RefusedTimestampAhead {
+					// Never stored anywhere, so it can take a new timestamp. While this device's
+					// clock is wrong the new one is refused too; once it is right, it goes out.
+					refused.Ahead = max(refused.Ahead, time.Duration(it.Timestamp-res.Time)*time.Millisecond)
+					r.clock.Reset(res.Time)
+					e := batch[i]
+					e.Item.Timestamp = r.clock.Now()
+					es = append(es, e)
+				}
 			}
 		}
 		if err := r.local.Put(es...); err != nil {
-			return false, err
+			return false, nil, err
+		}
+		if lo == cur+1 {
+			cur = hi
+			if err := r.setCursor(cur); err != nil {
+				return false, nil, err
+			}
 		}
 	}
-	return false, nil
+	return false, refused, nil
 }

@@ -20,7 +20,7 @@ The protocol is [SPEC.md](SPEC.md).
 | Package | What it is |
 |---|---|
 | `synckosh` | the item, timestamps, UUIDv7 guids, order keys, the data key and passphrase-sealed copies |
-| `client` | a device's `Replica`: put, delete, clear, read and sync, over a `Local` store |
+| `client` | a device's `Replica`: put, delete, clear, read and sync every bucket, over a `Local` store |
 | `server` | the server as an `http.Handler`, over a `Store`; signing in is the host's |
 | `bolt` | a `server.Store` and a `client.Local` in bbolt files |
 
@@ -30,10 +30,9 @@ The protocol is [SPEC.md](SPEC.md).
 local, _ := bolt.OpenLocal("sync.db")
 key, _ := synckosh.NewDataKey()             // or synckosh.OpenSealedCopy(item, passphrase)
 r, _ := client.Open(client.Config{
-	Client:  &client.Client{URL: "https://sync.example.com", HTTP: signedInHTTPClient},
-	Local:   local,
-	Key:     key,
-	Buckets: []string{"keys", "bookmarks"},
+	Client: &client.Client{URL: "https://sync.example.com", HTTP: signedInHTTPClient},
+	Local:  local,
+	Key:    key,
 })
 
 sealed, _ := key.SealedCopy(passphrase, "Main passphrase")
@@ -67,8 +66,8 @@ They sync devices through a real server and bbolt files: newest wins whichever d
 first, and the later push in the same millisecond; a login whose fields and passwords are items keeps both devices' edits; the server's file
 never holds a private part in the clear; a new store id refills the server, with a new device
 getting the data as it comes back; 2,500 items page without loss; clearing a bucket; reopening a
-device; retries, old versions, timestamps too far ahead and other accounts; cleanup; and joining
-with only a passphrase.
+device; retries, old versions, timestamps too far ahead and other accounts; cleanup; a device not pulling its own push back, unless another push came in between; a clock
+two days ahead refused with a clear error, then healing; and joining with only a passphrase.
 
 ## Not yet
 

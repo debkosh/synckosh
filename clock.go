@@ -42,6 +42,14 @@ func (c *Clock) Observe(t int64) {
 	}
 }
 
+// Reset moves the clock back to the server's time t, when the server refused a timestamp as
+// too far ahead. Once this device's wall clock is right, its next timestamps are accepted.
+func (c *Clock) Reset(t int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.last = min(c.last, t)
+}
+
 // Last returns the newest timestamp this clock has made or observed, for the device to keep
 // so the clock never goes back after a restart.
 func (c *Clock) Last() int64 {

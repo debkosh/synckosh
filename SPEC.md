@@ -44,7 +44,7 @@ the reference: `client` for a device, `server` for the server, `bolt` for storag
 | `deleted` | device | true for a deleted item. |
 | `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |
 | `private` | device | JSON sealed with the account's data key. |
-| `sequence` | server | the server's sequence number for this version: the order it was stored in, from one counter that only goes up. |
+| `sequence` | server | the server's sequence number for this version: the order it was stored in, from the account's own counter, which only goes up. |
 | `deleted_at` | server | the server's clock, in milliseconds, when it first stored the item deleted. |
 
 Fields a reader doesn't know are kept and written back unchanged, by the server and by clients.
@@ -57,7 +57,10 @@ A timestamp is a plain number of milliseconds. A device's timestamps:
 - don't follow a timestamp more than a day ahead of its own clock.
 
 All the items of one write get one timestamp, so writing many items doesn't move the clock ahead.
-The server refuses items more than a day ahead of its own clock.
+The server refuses items more than a day ahead of its own clock, with the code
+`timestamp-ahead` and its own time. The device then moves its clock back to the server's time
+and gives the refused items a new timestamp: they were never stored anywhere, so that is safe.
+While its clock is still wrong they are refused again; once it is right, they go out.
 
 Two devices that haven't seen each other's edit can make them in the same millisecond. Then the
 one the server stores last wins: the server stores an edit unless it holds one with a later
@@ -123,14 +126,15 @@ belongs to, and every account's items are apart.
 |---|---|
 | `GET /v1` | `{"version": 1}` |
 | `POST /v1/push` `{"items": [...]}` | push, below |
-| `GET /v1/pull?bucket=&after=&limit=` | pull, below |
+| `GET /v1/pull?after=&limit=&bucket=` | pull, below |
 
 Every answer to push and pull carries `store`: the account's store id.
 
 ### Push
 
-Up to 1000 items, each up to 1 MB, stored in one write. The server has one writer. For each
-item, in order:
+Up to 1000 items, each up to 1 MB, stored in one write. The server has one writer, so the items
+of one push get sequence numbers that run on with no gaps, and the next push gets the numbers
+after them. Each account has its own counter. For each item, in order:
 
 - **Stored** — there is no item with that guid, or the one there has the same or an earlier
   timestamp: `{"ok": true, "sequence": n}`. The server gives it the next sequence number, and sets
@@ -138,14 +142,21 @@ item, in order:
   same edit with a new `sequence`.
 - **Older** — the server holds a version with a later timestamp:
   `{"ok": false, "current": {...}}`. The device takes `current`.
-- **Refused** — the item is wrong, such as a timestamp too far ahead:
-  `{"ok": false, "error": "..."}`.
+- **Refused** — the item is wrong: `{"ok": false, "code": "...", "error": "..."}`. The code is
+  `timestamp-ahead` (more than a day ahead of the server's clock), `too-big` or `invalid`; the
+  error says what, for a person.
+
+The answer is `{"store", "time", "results": [...]}`, with one result per item in the order sent.
+`time` is the server's clock in milliseconds, so a device refused for `timestamp-ahead` can say
+by how much its clock is wrong.
 
 ### Pull
 
-The items of one bucket with `sequence` greater than `after`, lowest first, up to `limit` (default
-500, at most 1000): `{"store", "items": [...], "next": n, "more": bool}`. The device keeps
-`next` for that bucket and passes it as `after` next time.
+The account's items with `sequence` greater than `after`, of every bucket, lowest first, up to
+`limit` (default 500, at most 1000): `{"store", "items": [...], "next": n, "more": bool}`. The
+device keeps `next` and passes it as `after` next time. A bucket another device starts using
+just shows up. `bucket=` limits a pull to one bucket, for a device joining with a passphrase that
+reads only `keys` first.
 
 The pull goes by when the server stored an item, not by when it was made, so an old item pushed
 back later still reaches every device.
@@ -165,11 +176,15 @@ than that may keep items that were deleted meanwhile.
 
 ## A device's sync
 
-1. Pull each bucket from its `next`. Take each item, unless this device's version has a later
-   timestamp.
+1. Pull from the cursor, every bucket at once. Take each item, unless this device's version has
+   a later timestamp.
 2. If the store id changed, mark everything pending and start again from the beginning.
 3. Push everything changed here. For each `current` that comes back, take it.
-4. Keep the clock, the store id and each bucket's `next`.
+4. If a push's sequence numbers start just after the cursor, nothing else reached the server in
+   between, so move the cursor to the last of them: the device doesn't pull its own items back.
+   Otherwise leave the cursor, and the next pull brings what came in between, with these items.
+5. Keep going past refused items, and report them: they stay pending.
+6. Keep the clock, the store id and the cursor.
 
 ## Staying compatible
 

@@ -25,10 +25,11 @@ type Store interface {
 	SetStoreID(account, id string) error
 	Get(account, bucket, guid string) (synckosh.Item, bool, error)
 	Put(account string, items []synckosh.Item) error
-	// Since returns up to limit items of a bucket with a sequence number greater than after, lowest first.
+	// Since returns up to limit items with a sequence number greater than after, lowest first:
+	// of one bucket, or of every bucket if bucket is empty.
 	Since(account, bucket string, after uint64, limit int) ([]synckosh.Item, error)
-	// LastSequence returns the highest sequence number ever stored, across accounts.
-	LastSequence() (uint64, error)
+	// LastSequence returns the highest sequence number stored for the account, 0 if none.
+	LastSequence(account string) (uint64, error)
 	// Cleanup removes deleted items whose DeletedAt is before the given time, in milliseconds.
 	Cleanup(deletedBefore int64) (int, error)
 }
@@ -47,8 +48,8 @@ const (
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 var guidRe = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
 
-// Server serves the protocol. Writes go through one writer, which hands out sequence numbers in
-// the order they are stored.
+// Server serves the protocol. Writes go through one writer, which hands out each account's
+// sequence numbers in the order its items are stored, with no gaps within one push.
 type Server struct {
 	store Store
 	auth  Auth
@@ -56,16 +57,11 @@ type Server struct {
 	now   func() time.Time
 
 	write sync.Mutex // the one writer
-	last  uint64     // the last sequence number handed out
 }
 
 // New makes a server on a store.
 func New(store Store, auth Auth) (*Server, error) {
-	last, err := store.LastSequence()
-	if err != nil {
-		return nil, err
-	}
-	s := &Server{store: store, auth: auth, mux: http.NewServeMux(), now: time.Now, last: last}
+	s := &Server{store: store, auth: auth, mux: http.NewServeMux(), now: time.Now}
 	s.mux.HandleFunc("GET /v1", s.info)
 	s.mux.HandleFunc("POST /v1/push", s.authed(s.push))
 	s.mux.HandleFunc("GET /v1/pull", s.authed(s.pull))
@@ -129,37 +125,40 @@ func (s *Server) storeID(account string) (string, error) {
 }
 
 // Result is the answer for one pushed item: stored with its sequence number, or not stored because
-// the server holds a version with a later timestamp, returned in Current, or refused with an
-// Error.
+// the server holds a version with a later timestamp, returned in Current, or refused with a
+// Code (one of synckosh.Refused...) and an Error to read.
 type Result struct {
 	OK       bool           `json:"ok"`
 	Sequence uint64         `json:"sequence,omitempty"`
 	Current  *synckosh.Item `json:"current,omitempty"`
+	Code     string         `json:"code,omitempty"`
 	Error    string         `json:"error,omitempty"`
 }
 
-func (s *Server) check(raw json.RawMessage) (synckosh.Item, string) {
+func refused(code, msg string) *Result { return &Result{Code: code, Error: msg} }
+
+func (s *Server) check(raw json.RawMessage) (synckosh.Item, *Result) {
 	if len(raw) > maxItem {
-		return synckosh.Item{}, "item over 1 MB"
+		return synckosh.Item{}, refused(synckosh.RefusedTooBig, "item over 1 MB")
 	}
 	var it synckosh.Item
 	if err := json.Unmarshal(raw, &it); err != nil {
-		return synckosh.Item{}, err.Error()
+		return synckosh.Item{}, refused(synckosh.RefusedInvalid, err.Error())
 	}
 	switch {
 	case !nameRe.MatchString(it.Bucket):
-		return it, "bucket: lowercase letters, digits, dot, dash or underscore, up to 64"
+		return it, refused(synckosh.RefusedInvalid, "bucket: lowercase letters, digits, dot, dash or underscore, up to 64")
 	case !nameRe.MatchString(it.Type):
-		return it, "type: lowercase letters, digits, dot, dash or underscore, up to 64"
+		return it, refused(synckosh.RefusedInvalid, "type: lowercase letters, digits, dot, dash or underscore, up to 64")
 	case !guidRe.MatchString(it.GUID):
-		return it, "guid: letters, digits and ._:~- up to 128"
+		return it, refused(synckosh.RefusedInvalid, "guid: letters, digits and ._:~- up to 128")
 	case it.Timestamp <= 0:
-		return it, "timestamp: the time of the edit, in milliseconds"
+		return it, refused(synckosh.RefusedInvalid, "timestamp: the time of the edit, in milliseconds")
 	case it.Timestamp > s.now().Add(synckosh.MaxAhead).UnixMilli():
-		return it, "timestamp is more than a day ahead of the server's clock"
+		return it, refused(synckosh.RefusedTimestampAhead, "timestamp is more than a day ahead of the server's clock")
 	}
 	it.Sequence, it.DeletedAt = 0, 0 // the server's to set
-	return it, ""
+	return it, nil
 }
 
 type pushRequest struct {
@@ -177,7 +176,7 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 		return
 	}
 	in := make([]synckosh.Item, len(req.Items))
-	errs := make([]string, len(req.Items))
+	errs := make([]*Result, len(req.Items))
 	for i, raw := range req.Items {
 		in[i], errs[i] = s.check(raw)
 	}
@@ -189,15 +188,19 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 		internal(w, r, err)
 		return
 	}
+	seq, err := s.store.LastSequence(account)
+	if err != nil {
+		internal(w, r, err)
+		return
+	}
 	res := make([]Result, len(in))
 	type key struct{ bucket, guid string }
 	batch := map[key]int{} // items of this push already chosen to store, by index in out
 	var out []synckosh.Item
-	seq := s.last
 	now := s.now().UnixMilli()
 	for i, it := range in {
-		if errs[i] != "" {
-			res[i] = Result{Error: errs[i]}
+		if errs[i] != nil {
+			res[i] = *errs[i]
 			continue
 		}
 		k := key{it.Bucket, it.GUID}
@@ -236,16 +239,15 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 			internal(w, r, err)
 			return
 		}
-		s.last = seq
 	}
-	reply(w, http.StatusOK, map[string]any{"store": id, "results": res})
+	reply(w, http.StatusOK, map[string]any{"store": id, "time": now, "results": res})
 }
 
 func (s *Server) pull(w http.ResponseWriter, r *http.Request, account string) {
 	q := r.URL.Query()
 	bucket := q.Get("bucket")
-	if !nameRe.MatchString(bucket) {
-		fail(w, http.StatusBadRequest, "bucket: the bucket to pull")
+	if bucket != "" && !nameRe.MatchString(bucket) {
+		fail(w, http.StatusBadRequest, "bucket: the bucket to pull, or none for every bucket")
 		return
 	}
 	var after uint64

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,7 +70,7 @@ type device struct {
 	local *Local
 }
 
-func (e *env) device(name string, buckets ...string) *device {
+func (e *env) device(name string) *device {
 	e.t.Helper()
 	local, err := OpenLocal(filepath.Join(e.dir, name+".db"))
 	if err != nil {
@@ -78,7 +79,7 @@ func (e *env) device(name string, buckets ...string) *device {
 	e.t.Cleanup(func() { local.Close() })
 	r, err := client.Open(client.Config{
 		Client: &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}},
-		Local:  local, Key: e.key, Buckets: buckets,
+		Local:  local, Key: e.key,
 	})
 	if err != nil {
 		e.t.Fatal(err)
@@ -130,7 +131,7 @@ func bookmark(parent, title string) synckosh.Item {
 
 func TestTwoDevices(t *testing.T) {
 	e := newEnv(t)
-	mac, phone := e.device("mac", "bookmarks"), e.device("phone", "bookmarks")
+	mac, phone := e.device("mac"), e.device("phone")
 	b := put(t, mac, bookmark("root", "Go"))
 	sync(t, mac, phone)
 	got := items(t, phone, "bookmarks")
@@ -162,7 +163,7 @@ func TestNewestWins(t *testing.T) {
 	for _, first := range []string{"older", "newer"} {
 		t.Run(first+" pushes first", func(t *testing.T) {
 			e := newEnv(t)
-			mac, phone := e.device("mac", "settings"), e.device("phone", "settings")
+			mac, phone := e.device("mac"), e.device("phone")
 			s := put(t, mac, synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme",
 				Public: json.RawMessage(`{"key":"theme"}`), Private: json.RawMessage(`{"value":"dark"}`)})
 			sync(t, mac, phone)
@@ -192,7 +193,7 @@ func TestNewestWins(t *testing.T) {
 // later push wins on the server, and every device takes the server's copy.
 func TestSameMillisecondLaterPushWins(t *testing.T) {
 	e := newEnv(t)
-	mac, phone := e.device("mac", "settings"), e.device("phone", "settings")
+	mac, phone := e.device("mac"), e.device("phone")
 	s := put(t, mac, synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme",
 		Public: json.RawMessage(`{"key":"theme"}`), Private: json.RawMessage(`{"value":"dark"}`)})
 	sync(t, mac, phone)
@@ -222,7 +223,7 @@ func TestSameMillisecondLaterPushWins(t *testing.T) {
 
 func TestLoginAsItems(t *testing.T) {
 	e := newEnv(t)
-	mac, phone := e.device("mac", "logins"), e.device("phone", "logins")
+	mac, phone := e.device("mac"), e.device("phone")
 	login := put(t, mac, synckosh.Item{Bucket: "logins", Type: "login", Private: json.RawMessage(`{"origin":"https://x.com"}`)})
 	field := func(key, value string) synckosh.Item {
 		return synckosh.Item{Bucket: "logins", Type: "login-field",
@@ -255,7 +256,7 @@ func TestLoginAsItems(t *testing.T) {
 
 func TestServerSeesOnlyThePublicPart(t *testing.T) {
 	e := newEnv(t)
-	mac := e.device("mac", "logins")
+	mac := e.device("mac")
 	put(t, mac, synckosh.Item{Bucket: "logins", Type: "login-field",
 		Public: json.RawMessage(`{"parent":"l1","key":"password"}`), Private: json.RawMessage(`{"value":"hunter2"}`)})
 	sync(t, mac)
@@ -276,7 +277,7 @@ func TestServerSeesOnlyThePublicPart(t *testing.T) {
 // with their original timestamps; a new device gets the partial data, then the backfill.
 func TestNewStoreIDRefills(t *testing.T) {
 	e := newEnv(t)
-	mac, phone := e.device("mac", "bookmarks"), e.device("phone", "bookmarks")
+	mac, phone := e.device("mac"), e.device("phone")
 	a := put(t, mac, bookmark("root", "A"))
 	b := put(t, phone, bookmark("root", "B"))
 	sync(t, mac, phone, mac)
@@ -297,10 +298,10 @@ func TestNewStoreIDRefills(t *testing.T) {
 	t.Cleanup(ts.Close)
 	for _, d := range []*device{mac, phone} {
 		d.Replica, _ = client.Open(client.Config{Client: &client.Client{URL: ts.URL, HTTP: &http.Client{Transport: signedIn{"me"}}},
-			Local: d.local, Key: e.key, Buckets: []string{"bookmarks"}})
+			Local: d.local, Key: e.key})
 	}
 	e.url = ts.URL
-	tablet := e.device("tablet", "bookmarks")
+	tablet := e.device("tablet")
 
 	sync(t, mac) // the Mac refills first
 	sync(t, tablet)
@@ -325,7 +326,7 @@ func TestNewStoreIDRefills(t *testing.T) {
 
 func TestBigPushPagesWithoutLoss(t *testing.T) {
 	e := newEnv(t)
-	mac, phone := e.device("mac", "history"), e.device("phone", "history")
+	mac, phone := e.device("mac"), e.device("phone")
 	var visits []synckosh.Item
 	for i := 0; i < 2500; i++ {
 		visits = append(visits, synckosh.Item{Bucket: "history", Type: "visit", Private: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))})
@@ -349,10 +350,10 @@ func TestBigPushPagesWithoutLoss(t *testing.T) {
 
 func TestReopenKeepsEverything(t *testing.T) {
 	e := newEnv(t)
-	mac := e.device("mac", "bookmarks")
+	mac := e.device("mac")
 	b := put(t, mac, bookmark("root", "Go"))
 	mac.Replica, _ = client.Open(client.Config{Client: &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}},
-		Local: mac.local, Key: e.key, Buckets: []string{"bookmarks"}})
+		Local: mac.local, Key: e.key})
 	sync(t, mac) // the edit made before reopening is still pending, and goes out
 	it, has, _ := e.store.Get("me", "bookmarks", b.GUID)
 	if !has || it.Timestamp != b.Timestamp {
@@ -369,6 +370,11 @@ func TestServerChecks(t *testing.T) {
 	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
 	ctx := context.Background()
 	now := time.Now().UnixMilli()
+	// Another account's pushes don't use up this account's sequence numbers.
+	other := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"someone-else"}}}
+	for i := 0; i < 3; i++ {
+		other.Push(ctx, []synckosh.Item{{Bucket: "settings", Type: "setting", GUID: fmt.Sprint("o", i), Timestamp: now}})
+	}
 	it := synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme", Timestamp: now,
 		Extra: map[string]json.RawMessage{"later": json.RawMessage(`{"x":1}`)}}
 	for i := 0; i < 2; i++ {
@@ -393,22 +399,21 @@ func TestServerChecks(t *testing.T) {
 	future := it
 	future.Timestamp = now + 2*24*3600*1000
 	res, _ = c.Push(ctx, []synckosh.Item{future})
-	if res.Results[0].OK || res.Results[0].Error == "" {
-		t.Fatalf("a timestamp two days ahead: %+v", res.Results[0])
+	if r := res.Results[0]; r.OK || r.Code != synckosh.RefusedTimestampAhead || r.Error == "" || res.Time == 0 {
+		t.Fatalf("a timestamp two days ahead: %+v %d", r, res.Time)
 	}
 	anon := &client.Client{URL: e.url}
 	if _, err := anon.Pull(ctx, "settings", 0); err == nil {
 		t.Fatal("pulled without signing in")
 	}
-	other := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"someone-else"}}}
-	if p, _ := other.Pull(ctx, "settings", 0); len(p.Items) != 0 {
-		t.Fatal("another account sees my items")
+	if p, _ := other.Pull(ctx, "", 0); len(p.Items) != 3 {
+		t.Fatalf("another account sees my items: %d", len(p.Items))
 	}
 }
 
 func TestCleanup(t *testing.T) {
 	e := newEnv(t)
-	mac := e.device("mac", "bookmarks")
+	mac := e.device("mac")
 	b := put(t, mac, bookmark("root", "Go"))
 	keep := put(t, mac, bookmark("root", "Keep"))
 	sync(t, mac)
@@ -430,7 +435,7 @@ func TestCleanup(t *testing.T) {
 
 func TestJoinWithPassphrase(t *testing.T) {
 	e := newEnv(t)
-	mac := e.device("mac", "keys", "bookmarks")
+	mac := e.device("mac")
 	sealed, err := e.key.SealedCopy("correct horse battery staple", "Main")
 	if err != nil {
 		t.Fatal(err)
@@ -451,12 +456,119 @@ func TestJoinWithPassphrase(t *testing.T) {
 	}
 	local, _ := OpenLocal(filepath.Join(e.dir, "new.db"))
 	defer local.Close()
-	r, _ := client.Open(client.Config{Client: c, Local: local, Key: key, Buckets: []string{"keys", "bookmarks"}})
+	r, _ := client.Open(client.Config{Client: c, Local: local, Key: key})
 	if err := r.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := r.Items("bookmarks")
 	if len(got) != 1 || private(t, got[0])["title"] != "Go" {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// hook runs before each push a device makes, as if another device pushed just then.
+type hook struct {
+	signedIn
+	before func()
+}
+
+func (h hook) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodPost && h.before != nil {
+		h.before()
+	}
+	return h.signedIn.RoundTrip(r)
+}
+
+func cursor(t *testing.T, d *device) uint64 {
+	t.Helper()
+	b, err := d.local.Meta("after")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n uint64
+	json.Unmarshal(b, &n)
+	return n
+}
+
+// A device's own push doesn't come back to it: when the push's sequence numbers follow straight
+// on from its cursor, it moves its cursor past them. When another push got in between, it pulls
+// from its cursor, and so gets that push.
+func TestOwnPushDoesNotComeBack(t *testing.T) {
+	e := newEnv(t)
+	mac := e.device("mac")
+	var visits []synckosh.Item
+	for i := 0; i < 1500; i++ {
+		visits = append(visits, synckosh.Item{Bucket: "history", Type: "visit", Private: json.RawMessage(`{}`)})
+	}
+	mac.Put(visits...)
+	put(t, mac, bookmark("root", "Go"))
+	sync(t, mac)
+	if got, _ := e.store.LastSequence("me"); cursor(t, mac) != got || got != 1501 {
+		t.Fatalf("cursor %d after pushing, the server's last is %d", cursor(t, mac), got)
+	}
+
+	// Another device pushes just before the Mac does.
+	raw := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
+	var theirs synckosh.Item
+	local, _ := OpenLocal(filepath.Join(e.dir, "mac2.db"))
+	defer local.Close()
+	busy, _ := client.Open(client.Config{Local: local, Key: e.key, Client: &client.Client{URL: e.url,
+		HTTP: &http.Client{Transport: hook{signedIn{"me"}, func() {
+			if theirs.GUID != "" {
+				return
+			}
+			theirs = bookmark("root", "Theirs")
+			theirs.GUID, theirs.Timestamp = synckosh.NewGUID(), time.Now().UnixMilli()
+			sealed, _ := e.key.Seal(theirs)
+			raw.Push(context.Background(), []synckosh.Item{sealed})
+		}}}}})
+	d := &device{busy, "busy", local}
+	sync(t, d) // pulls everything, with nothing to push
+	put(t, d, bookmark("root", "Mine"))
+	sync(t, d) // its push lands just after theirs, so the cursor stays
+	if cursor(t, d) != 1501 {
+		t.Fatalf("cursor moved to %d past a push it never pulled", cursor(t, d))
+	}
+	sync(t, d) // and the next pull brings theirs, and its own back
+	if _, has, _ := d.Get("bookmarks", theirs.GUID); !has {
+		t.Fatal("the push that came in between never arrived")
+	}
+	if got, _ := e.store.LastSequence("me"); cursor(t, d) != got {
+		t.Fatalf("cursor %d, the server's last is %d", cursor(t, d), got)
+	}
+}
+
+// A device whose clock was two days ahead made an edit the server refuses. Sync says so clearly,
+// syncs the rest, and once the clock is right the edit goes out with a new timestamp.
+func TestClockAheadIsRefusedThenHeals(t *testing.T) {
+	e := newEnv(t)
+	mac := e.device("mac")
+	ahead := synckosh.Item{Bucket: "bookmarks", Type: "bookmark", GUID: synckosh.NewGUID(),
+		Timestamp: time.Now().Add(48 * time.Hour).UnixMilli(), Private: json.RawMessage(`{"title":"Ahead"}`)}
+	if err := mac.local.Put(client.Entry{Item: ahead, Pending: true}); err != nil {
+		t.Fatal(err)
+	}
+	fine := put(t, mac, bookmark("root", "Fine"))
+
+	err := mac.Sync(context.Background())
+	var refused *client.RefusedError
+	if !errors.As(err, &refused) || len(refused.Items) != 1 || refused.Items[0].GUID != ahead.GUID ||
+		refused.Items[0].Code != synckosh.RefusedTimestampAhead {
+		t.Fatalf("sync: %v", err)
+	}
+	if refused.Ahead < 47*time.Hour {
+		t.Fatalf("ahead by %s, want about two days", refused.Ahead)
+	}
+	if !strings.Contains(err.Error(), "clock is") {
+		t.Fatalf("not a clear error: %v", err)
+	}
+	if _, has, _ := e.store.Get("me", "bookmarks", fine.GUID); !has {
+		t.Fatal("the refused item held back the rest")
+	}
+
+	sync(t, mac)
+	it, has, _ := e.store.Get("me", "bookmarks", ahead.GUID)
+	if !has || it.Timestamp > time.Now().UnixMilli() {
+		t.Fatalf("after the clock is right: %v %+v", has, it)
 	}
 }

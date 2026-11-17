@@ -59,8 +59,9 @@ func u64(n uint64) []byte {
 	return b
 }
 
-// Store is a server.Store. Per account: "a/<account>" holds the store id, and for each sync
-// bucket "items" (guid to item) and "sequence" (sequence number to guid).
+// Store is a server.Store. Per account, "a/<account>" holds the store id, the last sequence
+// number, "seq" (sequence number to bucket and guid, across buckets) and, for each sync bucket,
+// "b/<bucket>" with "items" (guid to item) and "seq" (sequence number to guid).
 type Store struct{ db *bbolt.DB }
 
 func OpenStore(path string) (*Store, error) {
@@ -117,9 +118,23 @@ func (s *Store) Get(account, bucket, guid string) (synckosh.Item, bool, error) {
 	return it, has, err
 }
 
+// ref is how the account-wide index names an item: its bucket and guid.
+func ref(bucket, guid string) []byte { return []byte(bucket + "\x00" + guid) }
+
 func (s *Store) Put(account string, items []synckosh.Item) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
+		acct, err := sub(tx, true, "a", account)
+		if err != nil {
+			return err
+		}
+		all, err := acct.CreateBucketIfNotExists([]byte("seq"))
+		if err != nil {
+			return err
+		}
 		var last uint64
+		if v := acct.Get([]byte("last")); v != nil {
+			last = binary.BigEndian.Uint64(v)
+		}
 		for _, it := range items {
 			bk, err := sub(tx, true, "a", account, "b", it.Bucket)
 			if err != nil {
@@ -129,7 +144,7 @@ func (s *Store) Put(account string, items []synckosh.Item) error {
 			if err != nil {
 				return err
 			}
-			bySeq, err := bk.CreateBucketIfNotExists([]byte("sequence"))
+			bySeq, err := bk.CreateBucketIfNotExists([]byte("seq"))
 			if err != nil {
 				return err
 			}
@@ -139,6 +154,9 @@ func (s *Store) Put(account string, items []synckosh.Item) error {
 					return err
 				}
 				if err := bySeq.Delete(u64(o.Sequence)); err != nil {
+					return err
+				}
+				if err := all.Delete(u64(o.Sequence)); err != nil {
 					return err
 				}
 			}
@@ -152,45 +170,61 @@ func (s *Store) Put(account string, items []synckosh.Item) error {
 			if err := bySeq.Put(u64(it.Sequence), []byte(it.GUID)); err != nil {
 				return err
 			}
+			if err := all.Put(u64(it.Sequence), ref(it.Bucket, it.GUID)); err != nil {
+				return err
+			}
 			last = max(last, it.Sequence)
 		}
-		meta, err := sub(tx, true, "meta")
-		if err != nil {
-			return err
-		}
-		if cur := meta.Get([]byte("last")); cur != nil && binary.BigEndian.Uint64(cur) >= last {
-			return nil
-		}
-		return meta.Put([]byte("last"), u64(last))
+		return acct.Put([]byte("last"), u64(last))
 	})
 }
 
 func (s *Store) Since(account, bucket string, after uint64, limit int) ([]synckosh.Item, error) {
 	var out []synckosh.Item
 	err := s.db.View(func(tx *bbolt.Tx) error {
-		bk, _ := sub(tx, false, "a", account, "b", bucket)
-		if bk == nil {
-			return nil
-		}
-		byGUID, bySeq := bk.Bucket([]byte("items")), bk.Bucket([]byte("sequence"))
-		c := bySeq.Cursor()
-		for k, guid := c.Seek(u64(after + 1)); k != nil && len(out) < limit; k, guid = c.Next() {
+		read := func(bucket, guid []byte) error {
 			var it synckosh.Item
-			if err := json.Unmarshal(byGUID.Get(guid), &it); err != nil {
+			bk, _ := sub(tx, false, "a", account, "b", string(bucket), "items")
+			if err := json.Unmarshal(bk.Get(guid), &it); err != nil {
 				return err
 			}
 			out = append(out, it)
+			return nil
+		}
+		if bucket != "" {
+			bk, _ := sub(tx, false, "a", account, "b", bucket, "seq")
+			if bk == nil {
+				return nil
+			}
+			c := bk.Cursor()
+			for k, guid := c.Seek(u64(after + 1)); k != nil && len(out) < limit; k, guid = c.Next() {
+				if err := read([]byte(bucket), guid); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		all, _ := sub(tx, false, "a", account, "seq")
+		if all == nil {
+			return nil
+		}
+		c := all.Cursor()
+		for k, r := c.Seek(u64(after + 1)); k != nil && len(out) < limit; k, r = c.Next() {
+			b, guid, _ := bytes.Cut(r, []byte{0})
+			if err := read(b, guid); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
 	return out, err
 }
 
-func (s *Store) LastSequence() (uint64, error) {
+func (s *Store) LastSequence(account string) (uint64, error) {
 	var last uint64
 	err := s.db.View(func(tx *bbolt.Tx) error {
-		if meta := tx.Bucket([]byte("meta")); meta != nil {
-			if v := meta.Get([]byte("last")); v != nil {
+		if acct, _ := sub(tx, false, "a", account); acct != nil {
+			if v := acct.Get([]byte("last")); v != nil {
 				last = binary.BigEndian.Uint64(v)
 			}
 		}
@@ -206,14 +240,15 @@ func (s *Store) Cleanup(deletedBefore int64) (int, error) {
 		if accounts == nil {
 			return nil
 		}
-		return accounts.ForEachBucket(func(acct []byte) error {
-			buckets := accounts.Bucket(acct).Bucket([]byte("b"))
+		return accounts.ForEachBucket(func(name []byte) error {
+			acct := accounts.Bucket(name)
+			buckets, all := acct.Bucket([]byte("b")), acct.Bucket([]byte("seq"))
 			if buckets == nil {
 				return nil
 			}
 			return buckets.ForEachBucket(func(name []byte) error {
 				bk := buckets.Bucket(name)
-				byGUID, bySeq := bk.Bucket([]byte("items")), bk.Bucket([]byte("sequence"))
+				byGUID, bySeq := bk.Bucket([]byte("items")), bk.Bucket([]byte("seq"))
 				var gone [][2][]byte
 				err := byGUID.ForEach(func(guid, v []byte) error {
 					var it synckosh.Item
@@ -233,6 +268,9 @@ func (s *Store) Cleanup(deletedBefore int64) (int, error) {
 						return err
 					}
 					if err := bySeq.Delete(g[1]); err != nil {
+						return err
+					}
+					if err := all.Delete(g[1]); err != nil {
 						return err
 					}
 				}
@@ -312,35 +350,47 @@ func (l *Local) Put(entries ...client.Entry) error {
 
 func (l *Local) Each(bucket string, fn func(client.Entry) error) error {
 	return l.db.View(func(tx *bbolt.Tx) error {
-		b, _ := sub(tx, false, "items", bucket)
-		if b == nil {
+		each := func(b *bbolt.Bucket) error {
+			return b.ForEach(func(_, v []byte) error {
+				var e client.Entry
+				if err := json.Unmarshal(v, &e); err != nil {
+					return err
+				}
+				return fn(e)
+			})
+		}
+		if bucket != "" {
+			b, _ := sub(tx, false, "items", bucket)
+			if b == nil {
+				return nil
+			}
+			return each(b)
+		}
+		all := tx.Bucket([]byte("items"))
+		if all == nil {
 			return nil
 		}
-		return b.ForEach(func(_, v []byte) error {
-			var e client.Entry
-			if err := json.Unmarshal(v, &e); err != nil {
-				return err
-			}
-			return fn(e)
-		})
+		return all.ForEachBucket(func(name []byte) error { return each(all.Bucket(name)) })
 	})
 }
 
-func (l *Local) Pending(bucket string) ([]client.Entry, error) {
+func (l *Local) Pending() ([]client.Entry, error) {
 	var out []client.Entry
 	err := l.db.View(func(tx *bbolt.Tx) error {
-		p, _ := sub(tx, false, "pending", bucket)
-		items, _ := sub(tx, false, "items", bucket)
-		if p == nil || items == nil {
+		pending := tx.Bucket([]byte("pending"))
+		if pending == nil {
 			return nil
 		}
-		return p.ForEach(func(guid, _ []byte) error {
-			var e client.Entry
-			if err := json.Unmarshal(items.Get(guid), &e); err != nil {
-				return err
-			}
-			out = append(out, e)
-			return nil
+		return pending.ForEachBucket(func(name []byte) error {
+			items, _ := sub(tx, false, "items", string(name))
+			return pending.Bucket(name).ForEach(func(guid, _ []byte) error {
+				var e client.Entry
+				if err := json.Unmarshal(items.Get(guid), &e); err != nil {
+					return err
+				}
+				out = append(out, e)
+				return nil
+			})
 		})
 	})
 	return out, err

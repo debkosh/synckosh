@@ -28,12 +28,14 @@ type Result struct {
 	OK       bool           `json:"ok"`
 	Sequence uint64         `json:"sequence,omitempty"`
 	Current  *synckosh.Item `json:"current,omitempty"`
+	Code     string         `json:"code,omitempty"` // why it was refused: synckosh.Refused...
 	Error    string         `json:"error,omitempty"`
 }
 
 // Pushed is the server's answer to a push.
 type Pushed struct {
 	Store   string   `json:"store"`
+	Time    int64    `json:"time"` // the server's clock, in milliseconds
 	Results []Result `json:"results"`
 }
 
@@ -57,9 +59,13 @@ func (c *Client) Push(ctx context.Context, items []synckosh.Item) (Pushed, error
 	return p, nil
 }
 
-// Pull returns a bucket's items the server stored after the sequence number after.
+// Pull returns the items the server stored after the sequence number after: of one bucket, or
+// of every bucket if bucket is empty.
 func (c *Client) Pull(ctx context.Context, bucket string, after uint64) (Page, error) {
-	q := url.Values{"bucket": {bucket}, "after": {strconv.FormatUint(after, 10)}}
+	q := url.Values{"after": {strconv.FormatUint(after, 10)}}
+	if bucket != "" {
+		q.Set("bucket", bucket)
+	}
 	var p Page
 	err := c.do(ctx, http.MethodGet, "v1/pull?"+q.Encode(), nil, &p)
 	return p, err
