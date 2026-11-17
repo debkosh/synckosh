@@ -140,9 +140,10 @@ Every answer to push and pull carries `store`: the bucket's store id.
 
 ### Push
 
-As many items as the server's limits allow, stored in one write. The server has one writer, so the items
-of one push get sequence numbers that run on with no gaps, and the next push gets the numbers
-after them. Each bucket has its own counter. For each item, in order:
+As many items as the server's limits allow, stored in one write. A push is its bucket's only
+writer while it runs, so the items of one push get sequence numbers that run on with no gaps, and
+the next push gets the numbers after them. Each bucket has its own counter, which never goes
+back, even when cleanup removes the item that had the highest number. For each item, in order:
 
 - **Stored** — there is no item with that guid, or the one there has the same or an earlier
   timestamp: `{"ok": true, "sequence": n}`. The server gives it the next sequence number, and sets
@@ -173,6 +174,7 @@ back later still reaches every device.
 
 The server makes a store id for each bucket. It changes it, `server.ResetStore`, whenever it
 may have lost any of that bucket's data: a wipe, a restore from a backup, a move to a new host.
+After restoring the whole store from a backup, `server.ResetAll` changes every bucket's.
 A device that sees a store id it didn't sync with last pushes everything it has, live and
 deleted, with the timestamps they were made with, and reads every collection from the start. Newest
 wins settles the rest. A new device meanwhile gets what is there, then the rest as it arrives.

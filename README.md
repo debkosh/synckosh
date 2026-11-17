@@ -55,7 +55,8 @@ srv := server.New(store, func(r *http.Request) (string, error) {
 http.ListenAndServe(":8484", srv)
 ```
 
-`srv.ResetStore(bucket)` after any possible data loss, and `srv.Cleanup(90 * 24 * time.Hour)` now
+`srv.ResetStore(bucket)` after any possible data loss, `srv.ResetAll()` after restoring the store
+from a backup, and `srv.Cleanup(90 * 24 * time.Hour)` now
 and then.
 
 ## Tests

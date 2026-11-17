@@ -1,0 +1,182 @@
+// Package storetest checks that a server.Store keeps the contract the server relies on. A store's
+// own tests call Run with a way to open an empty store.
+package storetest
+
+import (
+	"errors"
+	"fmt"
+	"sync"
+	"testing"
+
+	"github.com/sudiptadeb/synckosh"
+	"github.com/sudiptadeb/synckosh/server"
+)
+
+// Run runs every check, each on a new empty store from open.
+func Run(t *testing.T, open func(t *testing.T) server.Store) {
+	for _, c := range []struct {
+		name string
+		fn   func(*testing.T, server.Store)
+	}{
+		{"StoreID", storeID},
+		{"UpdateAndSince", updateAndSince},
+		{"FailedUpdateStoresNothing", failedUpdate},
+		{"Cleanup", cleanup},
+	} {
+		t.Run(c.name, func(t *testing.T) { c.fn(t, open(t)) })
+	}
+}
+
+func item(collection, guid string, seq uint64) synckosh.Item {
+	return synckosh.Item{Collection: collection, Datatype: "note", GUID: guid, Timestamp: 1, Sequence: seq}
+}
+
+func put(t *testing.T, st server.Store, bucket string, its ...synckosh.Item) {
+	t.Helper()
+	if err := st.Update(bucket, func(tx server.Tx) error { return tx.Put(its) }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// since returns "collection/guid@sequence" for each item Since gives.
+func since(t *testing.T, st server.Store, bucket, collection string, after uint64, most int) []string {
+	t.Helper()
+	var out []string
+	err := st.Since(bucket, collection, after, func(it synckosh.Item) bool {
+		out = append(out, fmt.Sprintf("%s/%s@%d", it.Collection, it.GUID, it.Sequence))
+		return len(out) < most
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func last(t *testing.T, st server.Store, bucket string) uint64 {
+	t.Helper()
+	var n uint64
+	err := st.Update(bucket, func(tx server.Tx) error {
+		var err error
+		n, err = tx.Last()
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func same(t *testing.T, what string, got []string, want ...string) {
+	t.Helper()
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("%s: %v, want %v", what, got, want)
+	}
+}
+
+func storeID(t *testing.T, st server.Store) {
+	ids := make([]string, 10)
+	var wg sync.WaitGroup
+	for i := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			id, err := st.StoreID("a")
+			if err != nil {
+				t.Error(err)
+			}
+			ids[i] = id
+		}()
+	}
+	wg.Wait()
+	for _, id := range ids {
+		if id == "" || id != ids[0] {
+			t.Fatalf("first use from ten callers: %v", ids)
+		}
+	}
+	if err := st.SetStoreID("a", "s_new"); err != nil {
+		t.Fatal(err)
+	}
+	if id, _ := st.StoreID("a"); id != "s_new" {
+		t.Fatalf("after SetStoreID: %s", id)
+	}
+	b, _ := st.StoreID("b")
+	if err := st.ResetAll(); err != nil {
+		t.Fatal(err)
+	}
+	a2, _ := st.StoreID("a")
+	b2, _ := st.StoreID("b")
+	if a2 == "s_new" || b2 == b || a2 == "" || b2 == "" {
+		t.Fatalf("ResetAll left a store id: %s %s", a2, b2)
+	}
+}
+
+func updateAndSince(t *testing.T, st server.Store) {
+	put(t, st, "a", item("notes", "n1", 1), item("tasks", "t1", 2), item("notes", "n2", 3))
+	same(t, "every collection", since(t, st, "a", "", 0, 100), "notes/n1@1", "tasks/t1@2", "notes/n2@3")
+	same(t, "one collection", since(t, st, "a", "notes", 0, 100), "notes/n1@1", "notes/n2@3")
+	same(t, "after 1", since(t, st, "a", "", 1, 100), "tasks/t1@2", "notes/n2@3")
+	same(t, "until fn says stop", since(t, st, "a", "", 0, 2), "notes/n1@1", "tasks/t1@2")
+	same(t, "another bucket", since(t, st, "b", "", 0, 100))
+
+	put(t, st, "a", item("notes", "n1", 4)) // a new version replaces the old one
+	same(t, "after an edit", since(t, st, "a", "", 0, 100), "tasks/t1@2", "notes/n2@3", "notes/n1@4")
+	same(t, "one collection after an edit", since(t, st, "a", "notes", 0, 100), "notes/n2@3", "notes/n1@4")
+	if n := last(t, st, "a"); n != 4 {
+		t.Fatalf("last %d, want 4", n)
+	}
+	var got synckosh.Item
+	var has bool
+	st.Update("a", func(tx server.Tx) error {
+		var err error
+		got, has, err = tx.Get("notes", "n1")
+		return err
+	})
+	if !has || got.Sequence != 4 {
+		t.Fatalf("Get: %v %+v", has, got)
+	}
+	if n := last(t, st, "b"); n != 0 {
+		t.Fatalf("another bucket's last: %d", n)
+	}
+}
+
+func failedUpdate(t *testing.T, st server.Store) {
+	put(t, st, "a", item("notes", "n1", 1))
+	boom := errors.New("boom")
+	err := st.Update("a", func(tx server.Tx) error {
+		if err := tx.Put([]synckosh.Item{item("notes", "n2", 2), item("notes", "n1", 3)}); err != nil {
+			return err
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("Update returned %v, want fn's error", err)
+	}
+	same(t, "after a failed Update", since(t, st, "a", "", 0, 100), "notes/n1@1")
+	if n := last(t, st, "a"); n != 1 {
+		t.Fatalf("last %d after a failed Update, want 1", n)
+	}
+}
+
+func cleanup(t *testing.T, st server.Store) {
+	old, recent := item("notes", "old", 2), item("notes", "recent", 3)
+	old.Deleted, old.DeletedAt = true, 100
+	recent.Deleted, recent.DeletedAt = true, 300
+	put(t, st, "a", item("notes", "live", 1), recent, old)
+	put(t, st, "b", old)
+	n, err := st.Cleanup(200)
+	if err != nil || n != 2 {
+		t.Fatalf("Cleanup: %d %v, want 2 removed", n, err)
+	}
+	same(t, "after cleanup", since(t, st, "a", "", 0, 100), "notes/live@1", "notes/recent@3")
+	same(t, "after cleanup, one collection", since(t, st, "a", "notes", 0, 100), "notes/live@1", "notes/recent@3")
+	same(t, "the other bucket", since(t, st, "b", "", 0, 100))
+	// The removed item had the bucket's highest number; the counter doesn't go back.
+	old.Deleted, old.Sequence = false, 4
+	put(t, st, "b", old)
+	if n := last(t, st, "b"); n != 4 {
+		t.Fatalf("last %d", n)
+	}
+	if n := last(t, st, "a"); n != 3 {
+		t.Fatalf("last %d after cleanup, want 3", n)
+	}
+}

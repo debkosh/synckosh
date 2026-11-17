@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -95,5 +96,86 @@ func TestPushOverTheItemCountIsRefused(t *testing.T) {
 	}
 	if _, err := c.Push(context.Background(), its); err == nil || !strings.Contains(err.Error(), "413") {
 		t.Fatalf("three items to a server that takes two: %v", err)
+	}
+}
+
+func note(guid string) synckosh.Item {
+	return synckosh.Item{Collection: "notes", Datatype: "note", GUID: guid, Timestamp: time.Now().UnixMilli()}
+}
+
+// Two servers on one store, twenty devices pushing to one bucket at once: every push gets its
+// own run of numbers, with no gaps, and together they use every number once.
+func TestConcurrentPushesNumberInOrder(t *testing.T) {
+	st := openStore(t)
+	cs := []*client.Client{serve(t, server.New(st, auth)), serve(t, server.New(st, auth))}
+	const pushes, each = 20, 5
+	seqs := make([][]uint64, pushes)
+	var wg sync.WaitGroup
+	for p := range pushes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			its := make([]synckosh.Item, each)
+			for i := range its {
+				its[i] = note(synckosh.NewGUID())
+			}
+			res, err := cs[p%2].Push(context.Background(), its)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			for _, r := range res.Results {
+				seqs[p] = append(seqs[p], r.Sequence)
+			}
+		}()
+	}
+	wg.Wait()
+	seen := map[uint64]bool{}
+	for p, s := range seqs {
+		for i, n := range s {
+			if i > 0 && n != s[i-1]+1 {
+				t.Fatalf("push %d numbered %v, with a gap", p, s)
+			}
+			if seen[n] {
+				t.Fatalf("number %d given twice", n)
+			}
+			seen[n] = true
+		}
+	}
+	for n := uint64(1); n <= pushes*each; n++ {
+		if !seen[n] {
+			t.Fatalf("number %d never given", n)
+		}
+	}
+}
+
+func TestSameGUIDTwiceInOnePush(t *testing.T) {
+	c := serve(t, server.New(openStore(t), auth))
+	a, b := note("g"), note("g")
+	a.Public, b.Public = []byte(`{"v":1}`), []byte(`{"v":2}`)
+	res, err := c.Push(context.Background(), []synckosh.Item{a, b})
+	if err != nil || !res.Results[0].OK || !res.Results[1].OK || res.Results[1].Sequence != res.Results[0].Sequence+1 {
+		t.Fatalf("%v %+v", err, res)
+	}
+	p, _ := c.Pull(context.Background(), "", 0)
+	if len(p.Items) != 1 || string(p.Items[0].Public) != `{"v":2}` || p.Items[0].Sequence != 2 {
+		t.Fatalf("want the second, as sequence 2: %+v", p.Items)
+	}
+}
+
+// Cleanup can remove the item with the bucket's highest number; the next push still gets a
+// higher one, so no device's cursor is passed over.
+func TestCleanupNeverReusesANumber(t *testing.T) {
+	srv := server.New(openStore(t), auth)
+	c := serve(t, srv)
+	gone := note("gone")
+	gone.Deleted = true
+	c.Push(context.Background(), []synckosh.Item{note("kept"), gone})
+	if n, err := srv.Cleanup(-time.Minute); err != nil || n != 1 {
+		t.Fatalf("cleanup: %d %v", n, err)
+	}
+	res, err := c.Push(context.Background(), []synckosh.Item{note("next")})
+	if err != nil || res.Results[0].Sequence != 3 {
+		t.Fatalf("after cleanup removed number 2: %v %+v", err, res)
 	}
 }

@@ -11,28 +11,41 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/sudiptadeb/synckosh"
 )
 
-// Store keeps items. Every Put the server makes is one atomic write, and the server makes one
-// at a time. Items are stored as given, Sequence and DeletedAt included.
+// Store keeps each bucket's items. Items are stored as given, Sequence and DeletedAt included.
 type Store interface {
-	// StoreID returns the bucket's store id, making one on first use.
+	// StoreID returns the bucket's store id, making one on first use (atomically: two callers
+	// get the same id).
 	StoreID(bucket string) (string, error)
 	// SetStoreID replaces the bucket's store id, telling its clients to push all they have.
 	SetStoreID(bucket, id string) error
-	Get(bucket, collection, guid string) (synckosh.Item, bool, error)
-	Put(bucket string, items []synckosh.Item) error
-	// Since returns up to limit items with a sequence number greater than after, lowest first:
-	// of one collection, or of every collection if collection is empty.
-	Since(bucket, collection string, after uint64, limit int) ([]synckosh.Item, error)
-	// LastSequence returns the highest sequence number stored for the bucket, 0 if none.
-	LastSequence(bucket string) (uint64, error)
+	// ResetAll gives every bucket a new store id, as after a restore from a backup.
+	ResetAll() error
+	// Since calls fn with the bucket's items whose sequence is above after, lowest first, of one
+	// collection or of every collection if collection is empty, until fn returns false. It sees
+	// only whole Updates, in order.
+	Since(bucket, collection string, after uint64, fn func(synckosh.Item) bool) error
+	// Update runs fn as the bucket's only writer: from fn's first call until Update returns, no
+	// other Update of that bucket runs, on this server or any other sharing the store. What fn
+	// puts is stored all together if fn returns nil, and not at all otherwise.
+	Update(bucket string, fn func(Tx) error) error
 	// Cleanup removes deleted items whose DeletedAt is before the given time, in milliseconds.
+	// It never lowers a bucket's last sequence number.
 	Cleanup(deletedBefore int64) (int, error)
+}
+
+// Tx is one bucket's Update.
+type Tx interface {
+	// Last is the highest sequence number ever given in the bucket. It is a counter, not the
+	// highest one stored: it never goes back, even when cleanup removes the item that had it.
+	Last() (uint64, error)
+	Get(collection, guid string) (synckosh.Item, bool, error)
+	// Put stores items, each replacing its guid's version. Last becomes the highest stored.
+	Put(items []synckosh.Item) error
 }
 
 // Auth tells the server which bucket a request is for. It returns an error to refuse it.
@@ -41,8 +54,8 @@ type Auth func(r *http.Request) (bucket string, err error)
 // pageSize is the most items one pull answer holds.
 const pageSize = 500
 
-// Server serves the protocol. Writes go through one writer, which hands out each bucket's
-// sequence numbers in the order its items are stored, with no gaps within one push.
+// Server serves the protocol. Each push is one Update of its bucket, which hands out the
+// bucket's sequence numbers in the order its items are stored, with no gaps within one push.
 type Server struct {
 	// Limits are this server's; zero fields take synckosh.DefaultLimits. Set them before serving.
 	Limits synckosh.Limits
@@ -51,8 +64,6 @@ type Server struct {
 	auth  Auth
 	mux   *http.ServeMux
 	now   func() time.Time
-
-	write sync.Mutex // the one writer
 }
 
 // New makes a server on a store.
@@ -72,15 +83,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ResetStore gives a bucket a new store id. Its clients then push everything they have.
 // It is the one thing to do after the server may have lost any of the bucket's data.
 func (s *Server) ResetStore(bucket string) error {
-	s.write.Lock()
-	defer s.write.Unlock()
 	return s.store.SetStoreID(bucket, NewStoreID())
 }
 
+// ResetAll gives every bucket a new store id. It is the one thing to do after restoring the
+// store from a backup.
+func (s *Server) ResetAll() error { return s.store.ResetAll() }
+
 // Cleanup removes items deleted more than age ago.
 func (s *Server) Cleanup(age time.Duration) (int, error) {
-	s.write.Lock()
-	defer s.write.Unlock()
 	return s.store.Cleanup(s.now().Add(-age).UnixMilli())
 }
 
@@ -112,12 +123,6 @@ func (s *Server) authed(h func(http.ResponseWriter, *http.Request, string)) http
 		}
 		h(w, r, bucket)
 	}
-}
-
-func (s *Server) storeID(bucket string) (string, error) {
-	s.write.Lock()
-	defer s.write.Unlock()
-	return s.store.StoreID(bucket)
 }
 
 func refused(code, msg string) *synckosh.Result { return &synckosh.Result{Code: code, Error: msg} }
@@ -161,23 +166,36 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 		in[i], errs[i] = s.check(raw, limits)
 	}
 
-	s.write.Lock()
-	defer s.write.Unlock()
 	id, err := s.store.StoreID(bucket)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
-	seq, err := s.store.LastSequence(bucket)
+	now := s.now().UnixMilli()
+	var res []synckosh.Result
+	err = s.store.Update(bucket, func(tx Tx) error {
+		var err error
+		res, err = store(tx, in, errs, now)
+		return err
+	})
 	if err != nil {
 		internal(w, r, err)
 		return
+	}
+	reply(w, http.StatusOK, synckosh.Pushed{Store: id, Time: now, Results: res})
+}
+
+// store keeps what a push brings, inside its bucket's Update: each item, unless the bucket holds
+// a version with a later timestamp. It numbers what it stores on from the bucket's last number.
+func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]synckosh.Result, error) {
+	seq, err := tx.Last()
+	if err != nil {
+		return nil, err
 	}
 	res := make([]synckosh.Result, len(in))
 	type key struct{ collection, guid string }
 	batch := map[key]int{} // items of this push already chosen to store, by index in out
 	var out []synckosh.Item
-	now := s.now().UnixMilli()
 	for i, it := range in {
 		if errs[i] != nil {
 			res[i] = *errs[i]
@@ -187,9 +205,8 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 		cur, has := synckosh.Item{}, false
 		if j, ok := batch[k]; ok {
 			cur, has = out[j], true
-		} else if cur, has, err = s.store.Get(bucket, it.Collection, it.GUID); err != nil {
-			internal(w, r, err)
-			return
+		} else if cur, has, err = tx.Get(it.Collection, it.GUID); err != nil {
+			return nil, err
 		}
 		if has && it.Timestamp < cur.Timestamp {
 			c := cur
@@ -214,13 +231,10 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 		}
 		res[i] = synckosh.Result{OK: true, Sequence: seq}
 	}
-	if len(out) > 0 {
-		if err := s.store.Put(bucket, out); err != nil {
-			internal(w, r, err)
-			return
-		}
+	if len(out) == 0 {
+		return res, nil
 	}
-	reply(w, http.StatusOK, map[string]any{"store": id, "time": now, "results": res})
+	return res, tx.Put(out)
 }
 
 func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -239,28 +253,26 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
 		}
 		after = n
 	}
-	id, err := s.storeID(bucket)
+	id, err := s.store.StoreID(bucket)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
-	items, err := s.store.Since(bucket, collection, after, pageSize+1)
+	p := synckosh.Page{Store: id, Items: []synckosh.Item{}, Next: after}
+	err = s.store.Since(bucket, collection, after, func(it synckosh.Item) bool {
+		if len(p.Items) == pageSize {
+			p.More = true
+			return false
+		}
+		p.Items = append(p.Items, it)
+		p.Next = it.Sequence
+		return true
+	})
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
-	more := len(items) > pageSize
-	if more {
-		items = items[:pageSize]
-	}
-	next := after
-	if len(items) > 0 {
-		next = items[len(items)-1].Sequence
-	}
-	if items == nil {
-		items = []synckosh.Item{}
-	}
-	reply(w, http.StatusOK, map[string]any{"store": id, "items": items, "next": next, "more": more})
+	reply(w, http.StatusOK, p)
 }
 
 // NewStoreID makes a store id, for a Store to use when a bucket has none.

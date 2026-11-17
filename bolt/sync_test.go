@@ -84,6 +84,37 @@ func (e *env) device(name string) *device {
 	return &device{r, name, local}
 }
 
+// stored returns the server's version of an item in bucket "me".
+func stored(t *testing.T, st *Store, collection, guid string) (synckosh.Item, bool) {
+	t.Helper()
+	var it synckosh.Item
+	var has bool
+	err := st.Update("me", func(tx server.Tx) error {
+		var err error
+		it, has, err = tx.Get(collection, guid)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return it, has
+}
+
+// last returns bucket "me"'s last sequence number.
+func last(t *testing.T, st *Store) uint64 {
+	t.Helper()
+	var n uint64
+	err := st.Update("me", func(tx server.Tx) error {
+		var err error
+		n, err = tx.Last()
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func sync(t *testing.T, ds ...*device) {
 	t.Helper()
 	for _, d := range ds {
@@ -305,12 +336,12 @@ func TestNewStoreIDRefills(t *testing.T) {
 	if got := items(t, tablet, "bookmarks"); len(got) != 1 || got[0].GUID != a.GUID {
 		t.Fatalf("tablet after the Mac refilled: %+v", got)
 	}
-	it, _, _ := st.Get("me", "bookmarks", a.GUID)
+	it, _ := stored(t, st, "bookmarks", a.GUID)
 	orig, _, _ := mac.Get("bookmarks", a.GUID)
 	if it.Timestamp != orig.Timestamp {
 		t.Fatalf("refilled with a new timestamp: %v, was %v", it.Timestamp, orig.Timestamp)
 	}
-	gone, has, _ := st.Get("me", "bookmarks", b.GUID)
+	gone, has := stored(t, st, "bookmarks", b.GUID)
 	if !has || !gone.Deleted {
 		t.Fatal("the refill dropped a delete")
 	}
@@ -352,7 +383,7 @@ func TestReopenKeepsEverything(t *testing.T) {
 	mac.Replica, _ = client.Open(client.Config{Client: &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}},
 		Local: mac.local, Key: e.key})
 	sync(t, mac) // the edit made before reopening is still pending, and goes out
-	it, has, _ := e.store.Get("me", "bookmarks", b.GUID)
+	it, has := stored(t, e.store, "bookmarks", b.GUID)
 	if !has || it.Timestamp != b.Timestamp {
 		t.Fatalf("after reopening: %v %+v", has, it)
 	}
@@ -422,10 +453,10 @@ func TestCleanup(t *testing.T) {
 	if n, err := e.srv.Cleanup(-time.Minute); err != nil || n != 1 {
 		t.Fatalf("cleanup: %d %v", n, err)
 	}
-	if _, has, _ := e.store.Get("me", "bookmarks", b.GUID); has {
+	if _, has := stored(t, e.store, "bookmarks", b.GUID); has {
 		t.Fatal("cleaned item still there")
 	}
-	if _, has, _ := e.store.Get("me", "bookmarks", keep.GUID); !has {
+	if _, has := stored(t, e.store, "bookmarks", keep.GUID); !has {
 		t.Fatal("cleanup removed a live item")
 	}
 }
@@ -500,7 +531,7 @@ func TestOwnPushDoesNotComeBack(t *testing.T) {
 	mac.Put(visits...)
 	put(t, mac, bookmark("root", "Go"))
 	sync(t, mac)
-	if got, _ := e.store.LastSequence("me"); cursor(t, mac) != got || got != 1501 {
+	if got := last(t, e.store); cursor(t, mac) != got || got != 1501 {
 		t.Fatalf("cursor %d after pushing, the server's last is %d", cursor(t, mac), got)
 	}
 
@@ -530,7 +561,7 @@ func TestOwnPushDoesNotComeBack(t *testing.T) {
 	if _, has, _ := d.Get("bookmarks", theirs.GUID); !has {
 		t.Fatal("the push that came in between never arrived")
 	}
-	if got, _ := e.store.LastSequence("me"); cursor(t, d) != got {
+	if got := last(t, e.store); cursor(t, d) != got {
 		t.Fatalf("cursor %d, the server's last is %d", cursor(t, d), got)
 	}
 }
@@ -559,12 +590,12 @@ func TestClockAheadIsRefusedThenHeals(t *testing.T) {
 	if !strings.Contains(err.Error(), "clock is") {
 		t.Fatalf("not a clear error: %v", err)
 	}
-	if _, has, _ := e.store.Get("me", "bookmarks", fine.GUID); !has {
+	if _, has := stored(t, e.store, "bookmarks", fine.GUID); !has {
 		t.Fatal("the refused item held back the rest")
 	}
 
 	sync(t, mac)
-	it, has, _ := e.store.Get("me", "bookmarks", ahead.GUID)
+	it, has := stored(t, e.store, "bookmarks", ahead.GUID)
 	if !has || it.Timestamp > time.Now().UnixMilli() {
 		t.Fatalf("after the clock is right: %v %+v", has, it)
 	}
