@@ -264,7 +264,9 @@ may have lost any of that bucket's data: a wipe, a restore from a backup, a move
 After restoring the whole store from a backup, `server.ResetAll` changes every bucket's.
 A device that sees a store id it didn't sync with last pushes everything it has, live and
 deleted, with the timestamps they were made with, and reads every collection from the start. Newest
-wins settles the rest. A new device meanwhile gets what is there, then the rest as it arrives.
+wins settles the rest. To make that survive a crash, the device marks every entry it can open
+pending, clears every entry's `sequence` and `base`, which mean nothing on the new store, resets
+its cursor, and saves the new store id last: a crash anywhere before repeats the refill. A new device meanwhile gets what is there, then the rest as it arrives.
 A device that removed deleted items has none to push, so after a reset an item can come back if a
 device that never saw its delete still holds it, unless some device keeps deleted items.
 
@@ -292,7 +294,8 @@ until the app removes those deleted, or before a cutoff, longer ago than an age 
 
 1. Pull from the cursor, every collection at once. Take each item, unless this device's version has
    a later timestamp.
-2. If the store id changed, mark everything pending and start again from the beginning.
+2. If the store id changed, refill: mark everything pending, store id last, and start again from
+   the beginning.
 3. Push everything changed here. For each `current` that comes back, take it.
 4. If a push's sequence numbers start just after the cursor, nothing else reached the server in
    between, so move the cursor to the last of them: the device doesn't pull its own items back.

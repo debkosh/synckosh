@@ -466,8 +466,8 @@ func (r *Replica) Sync(ctx context.Context) error {
 }
 
 // checkStore compares the server's store id with the one this device last synced with. On a
-// new one, it marks everything here pending and reads from the start. Locked entries are not
-// pushed: the devices that can open them hold the real copy.
+// new one, the server may have lost data, so the device refills it. The store id is saved last:
+// a crash anywhere before repeats the refill.
 func (r *Replica) checkStore(id string) (bool, error) {
 	old, err := r.local.Meta("store")
 	if err != nil {
@@ -476,26 +476,33 @@ func (r *Replica) checkStore(id string) (bool, error) {
 	if string(old) == id {
 		return false, nil
 	}
-	if err := r.local.SetMeta("store", []byte(id)); err != nil {
-		return false, err
-	}
-	if old == nil {
-		return false, nil // the first sync
-	}
-	var all []Entry
-	if err := r.local.Each("", func(e Entry) error {
-		if !e.Locked {
-			e.Pending = true
-			all = append(all, e)
+	if old != nil { // not the first sync
+		if err := r.refill(); err != nil {
+			return false, err
 		}
+	}
+	return old != nil, r.local.SetMeta("store", []byte(id))
+}
+
+// refill marks every entry this device can open pending, to push it all back, and reads from
+// the start. Locked entries are not pushed: the devices that can open them hold the real copy.
+// Sequence numbers of the old store mean nothing on the new one, so every entry loses its
+// sequence and base, and a refill never merges.
+func (r *Replica) refill() error {
+	var all []Entry
+	err := r.local.Each("", func(e Entry) error {
+		e.Pending = e.Pending || !e.Locked
+		e.Item.Sequence, e.Item.Base = 0, 0
+		all = append(all, e)
 		return nil
-	}); err != nil {
-		return false, err
+	})
+	if err != nil {
+		return err
 	}
 	if err := r.local.Put(all...); err != nil {
-		return false, err
+		return err
 	}
-	return true, r.setCursor(0)
+	return r.setCursor(0)
 }
 
 // The cursor is the sequence number of the last item this device has from the server.
