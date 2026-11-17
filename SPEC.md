@@ -17,9 +17,11 @@ Three levels name where an item lives:
 - **For each guid, the item with the newest timestamp wins;** in the same millisecond, the one
   the server stored last. That is all the server does with items. It never opens a private part.
 - **Sync knows only items.** The protocol has no schema: what an item holds, and how items relate,
-  is the app's choice. Nothing is ever deleted because of another item.
-- **Deletes are updates.** A deleted item stays, marked deleted, so every device hears of it.
-  Only the server's cleanup removes items, long after they were deleted.
+  is the app's choice. Nothing is ever deleted because of another item, but for a collection's
+  delete-before.
+- **Deletes are updates.** The server keeps a deleted item, marked deleted and with its data, so
+  every device hears of it, until its cleanup removes it long after. A device removes the item once
+  the server holds the delete, unless it is set to keep deleted items.
 - **The devices hold the real copy.** If the server loses anything, devices push it back.
 
 ## The item
@@ -58,7 +60,8 @@ Fields a reader doesn't know are kept and written back unchanged, by the server 
 
 Names that start with `_` belong to the protocol; an app's names can't start with one. The
 collection `_sealedkeys` holds the data key's sealed copies, of datatype `_sealedkey`, and
-nothing else. A server refuses, and a device neither writes nor takes, an item whose names break
+nothing else. A collection's delete-before has datatype and guid `_deletebefore`, is never
+deleted, and its public part is `{"before": <milliseconds>}`. A server refuses, and a device neither writes nor takes, an item whose names break
 these rules.
 
 ### Timestamps
@@ -66,10 +69,10 @@ these rules.
 A timestamp is a plain number of milliseconds. A device's timestamps:
 - are always after every one it has made or read: its clock, or one millisecond past the newest
   it has seen when its clock is behind;
-- don't follow a timestamp more than a day ahead of its own clock.
+- don't follow a timestamp more than an hour ahead of its own clock.
 
 All the items of one write get one timestamp, so writing many items doesn't move the clock ahead.
-The server refuses items more than a day ahead of its own clock, with the code
+The server refuses items more than an hour ahead of its own clock, with the code
 `timestamp-ahead` and its own time. The device then moves its clock back to the server's time
 and gives the refused items a new timestamp: they were never stored anywhere, so that is safe.
 While its clock is still wrong they are refused again; once it is right, they go out.
@@ -132,10 +135,25 @@ whatever it chooses:
 - **Order is a field too.** Two devices can give two items the same order key. `synckosh.Between`
   is an optional helper that makes a key between two others.
 
-### Clearing a collection
+### Deleting before a cutoff
 
-An item of datatype `sync.clear` in a collection means everything in that collection made before it is gone.
-Clearing history is one such item, not one delete per visit.
+A collection's delete-before deletes every item of the collection whose timestamp is at or before
+its cutoff, `before`. Deleting a browser's history is one such item, not one delete per visit.
+
+- **There is one per collection**, an ordinary item for newest wins: its timestamp is when it was
+  written. A device writing one uses the later of the cutoff there and the one asked for, so the
+  cutoff only moves forward, and the library always seals it with its public part.
+- **The server reads it:** it is the one item whose content the server interprets. On storing one,
+  in the same write, it removes every item of the collection at or before the cutoff; the
+  delete-before itself stays. From then on it answers a pushed item of the collection at or before
+  the cutoff `{"ok": true}`, with no sequence number, and doesn't store it, so a refill or a device
+  away for long can't bring it back. It answers a delete-before with an earlier cutoff than the one
+  it holds with `current`. It refuses one whose cutoff is more than the ahead limit past its clock,
+  as `timestamp-ahead`.
+- **A device** that writes or receives one moves its clock past the cutoff, so its later edits come
+  after it, and removes its entries at or before the cutoff; set to keep deleted items, it keeps
+  them, reported as deleted. An edit of such an item gets a timestamp past the cutoff and syncs as
+  usual.
 
 ## Keys
 
@@ -169,7 +187,8 @@ Clearing history is one such item, not one delete per visit.
 
 When a bucket has a data key, the server, and anyone who controls it or the connection, cannot read
 a private part. It cannot make a device that holds the key use anything a key holder did not
-write: it cannot forge, alter or move an item, or mark one deleted. Public parts are checked only
+write: it cannot forge, alter or move an item, mark one deleted, or make a device delete a
+collection's items before a cutoff. Public parts are checked only
 for items sealed with their public part; for the others, the server can change the public part.
 
 An item sealed under a key the device doesn't hold is kept as locked. A locked item is
@@ -211,6 +230,8 @@ writer while it runs, so the items of one push get sequence numbers that run on 
 the next push gets the numbers after them. Each bucket has its own counter, which never goes
 back, even when cleanup removes the item that had the highest number. For each item, in order:
 
+- **Deleted already** — the item is at or before its collection's delete-before cutoff:
+  `{"ok": true}`, with no sequence number. The server doesn't store it, and the device marks it sent.
 - **Stored** — there is no item with that guid, or the one there has the same or an earlier
   timestamp: `{"ok": true, "sequence": n}`. The server gives it the next sequence number, and sets
   `deleted_at` if it is deleted. A retry of an edit the server already has is stored again: the
@@ -218,7 +239,7 @@ back, even when cleanup removes the item that had the highest number. For each i
 - **Older** — the server holds a version with a later timestamp:
   `{"ok": false, "current": {...}}`. The device takes `current`.
 - **Refused** — the item is wrong: `{"ok": false, "code": "...", "error": "..."}`. The code is
-  `timestamp-ahead` (more than a day ahead of the server's clock), `too-big` (over the server's
+  `timestamp-ahead` (more than an hour ahead of the server's clock), `too-big` (over the server's
   item limit) or `invalid`; the error says what, for a person.
 
 The answer is `{"store", "time", "results": [...]}`, with one result per item in the order sent.
@@ -244,6 +265,8 @@ After restoring the whole store from a backup, `server.ResetAll` changes every b
 A device that sees a store id it didn't sync with last pushes everything it has, live and
 deleted, with the timestamps they were made with, and reads every collection from the start. Newest
 wins settles the rest. A new device meanwhile gets what is there, then the rest as it arrives.
+A device that removed deleted items has none to push, so after a reset an item can come back if a
+device that never saw its delete still holds it, unless some device keeps deleted items.
 
 ### Limits
 
@@ -262,6 +285,9 @@ A device refuses an edit over its own item limit when it is made, rather than le
 The server removes items deleted more than a set time ago, such as 90 days. A device away longer
 than that may keep items that were deleted meanwhile.
 
+A device removes nothing because of the server's cleanup. One set to keep deleted items keeps them
+until the app removes those deleted, or before a cutoff, longer ago than an age it chooses.
+
 ## A device's sync
 
 1. Pull from the cursor, every collection at once. Take each item, unless this device's version has
@@ -271,6 +297,7 @@ than that may keep items that were deleted meanwhile.
 4. If a push's sequence numbers start just after the cursor, nothing else reached the server in
    between, so move the cursor to the last of them: the device doesn't pull its own items back.
    Otherwise leave the cursor, and the next pull brings what came in between, with these items.
+   Results with no sequence number don't count.
 5. Keep going past refused items, and report them: they stay pending.
 6. Keep the clock, the store id and the cursor.
 

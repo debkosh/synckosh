@@ -73,10 +73,13 @@ func (l Limits) OrDefaults() Limits {
 }
 
 // Names the library owns start with "_", which an app's names can't. The sealed copies of the
-// data key are items of datatype SealedKeyDatatype in KeysCollection, and nothing else is.
+// data key are items of datatype SealedKeyDatatype in KeysCollection, and nothing else is. A
+// collection's DeleteBeforeItem, the one item with that datatype and guid, deletes every item of
+// the collection with a timestamp at or before its cutoff.
 const (
 	KeysCollection    = "_sealedkeys"
 	SealedKeyDatatype = "_sealedkey"
+	DeleteBeforeItem  = "_deletebefore"
 )
 
 var (
@@ -87,23 +90,38 @@ var (
 // Valid checks an item's names and timestamp. The server refuses an invalid item, a device
 // won't put one, and a device takes none from the server.
 func Valid(it Item) error {
+	keys := it.Collection == KeysCollection || it.Datatype == SealedKeyDatatype
+	cut := it.Datatype == DeleteBeforeItem || it.GUID == DeleteBeforeItem
 	switch {
-	case it.Collection == KeysCollection || it.Datatype == SealedKeyDatatype:
-		if it.Collection != KeysCollection || it.Datatype != SealedKeyDatatype {
-			return errors.New("the " + KeysCollection + " collection holds only " + SealedKeyDatatype + " items")
-		}
-	case !nameRe.MatchString(it.Collection):
+	case keys && (it.Collection != KeysCollection || it.Datatype != SealedKeyDatatype):
+		return errors.New("the " + KeysCollection + " collection holds only " + SealedKeyDatatype + " items")
+	case cut && (it.Datatype != DeleteBeforeItem || it.GUID != DeleteBeforeItem || it.Deleted):
+		return errors.New("a collection's " + DeleteBeforeItem + " item has that datatype and guid, and is never deleted")
+	case !keys && !nameRe.MatchString(it.Collection):
 		return errors.New("collection: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot, dash or underscore")
-	case !nameRe.MatchString(it.Datatype):
+	case !keys && !cut && !nameRe.MatchString(it.Datatype):
 		return errors.New("datatype: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot, dash or underscore")
-	}
-	switch {
-	case !guidRe.MatchString(it.GUID):
+	case !cut && !guidRe.MatchString(it.GUID):
 		return errors.New("guid: letters, digits and ._:~- up to 128, not starting with underscore")
 	case it.Timestamp <= 0:
 		return errors.New("timestamp: the time of the edit, in milliseconds")
 	}
+	if cut {
+		_, err := Cutoff(it)
+		return err
+	}
 	return nil
+}
+
+// Cutoff returns the cutoff of a DeleteBeforeItem, from its public part {"before": ms}.
+func Cutoff(it Item) (int64, error) {
+	var p struct {
+		Before int64 `json:"before"`
+	}
+	if json.Unmarshal(it.Public, &p) != nil || p.Before <= 0 {
+		return 0, errors.New(DeleteBeforeItem + `: public part {"before": milliseconds}`)
+	}
+	return p.Before, nil
 }
 
 // ValidName checks a collection name, as a pull asks for one.

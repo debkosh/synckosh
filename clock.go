@@ -7,8 +7,10 @@ import (
 
 // MaxAhead is how far ahead of this device's clock a timestamp it reads may be and still move
 // its clock forward. A device with its clock set a year ahead can't drag every other device's
-// clock along, and the server refuses items that far ahead.
-const MaxAhead = 24 * time.Hour
+// clock along, and the server refuses items that far ahead. An hour is generous for devices
+// that keep network time, and bounds what one wrong clock can do: a delete-before stamped ahead
+// deletes other devices' newer items for good.
+const MaxAhead = time.Hour
 
 // Clock makes timestamps, in milliseconds, that are always after every one this device has
 // made or read, so an edit made after seeing another always wins over it, whatever the wall

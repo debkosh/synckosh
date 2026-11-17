@@ -65,6 +65,7 @@ type device struct {
 	*client.Replica
 	name  string
 	local *Local
+	cfg   client.Config
 }
 
 func (e *env) device(name string) *device {
@@ -86,7 +87,7 @@ func (e *env) deviceWith(name string, cfg client.Config) *device {
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	return &device{r, name, local}
+	return &device{r, name, local, cfg}
 }
 
 // stored returns the server's version of an item in bucket "me".
@@ -179,16 +180,9 @@ func TestTwoDevices(t *testing.T) {
 	if got := items(t, mac, "bookmarks"); len(got) != 0 {
 		t.Fatalf("deleted on the phone, still on the Mac: %+v", got)
 	}
-	it, _, _ := mac.Get("bookmarks", b.GUID)
-	if !it.Deleted || it.DeletedAt == 0 || private(t, it)["title"] != "Go" {
-		t.Fatalf("a delete is marked by the server and keeps its data: %+v", it)
-	}
-
-	// Putting it again restores it.
-	put(t, mac, it)
-	sync(t, mac, phone)
-	if got := items(t, phone, "bookmarks"); len(got) != 1 {
-		t.Fatalf("restored on the Mac, not on the phone: %+v", got)
+	it, has := stored(t, e.store, "bookmarks", b.GUID)
+	if !has || !it.Deleted || it.DeletedAt == 0 {
+		t.Fatalf("the server keeps a delete, marked: %+v", it)
 	}
 }
 
@@ -310,7 +304,8 @@ func TestServerSeesOnlyThePublicPart(t *testing.T) {
 // with their original timestamps; a new device gets the partial data, then the backfill.
 func TestNewStoreIDRefills(t *testing.T) {
 	e := newEnv(t)
-	mac, phone := e.device("mac"), e.device("phone")
+	// The Mac keeps deleted items, so its refill brings back the phone's delete too.
+	mac, phone := e.deviceWith("mac", client.Config{KeepDeleted: true}), e.device("phone")
 	a := put(t, mac, bookmark("root", "A"))
 	b := put(t, phone, bookmark("root", "B"))
 	sync(t, mac, phone, mac)
@@ -320,20 +315,9 @@ func TestNewStoreIDRefills(t *testing.T) {
 	sync(t, phone, mac)
 
 	// The server loses everything: a fresh store.
-	e.store.Close()
-	st, err := OpenStore(filepath.Join(e.dir, "server2.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	srv := server.New(st, auth)
-	ts := httptest.NewServer(srv)
-	t.Cleanup(ts.Close)
-	for _, d := range []*device{mac, phone} {
-		d.Replica, _ = client.Open(client.Config{Client: &client.Client{URL: ts.URL, HTTP: &http.Client{Transport: signedIn{"me"}}},
-			Local: d.local, Key: e.key})
-	}
-	e.url = ts.URL
+	st := e.newServer()
+	e.reopen(mac)
+	e.reopen(phone)
 	tablet := e.device("tablet")
 
 	sync(t, mac) // the Mac refills first
@@ -371,13 +355,13 @@ func TestBigPushPagesWithoutLoss(t *testing.T) {
 	if got := items(t, phone, "history"); len(got) != 2500 {
 		t.Fatalf("phone has %d visits, want 2500", len(got))
 	}
-	if err := mac.Clear("history"); err != nil {
+	if err := mac.DeleteBefore("history", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	put(t, mac, synckosh.Item{Collection: "history", Datatype: "visit", Private: json.RawMessage(`{"n":"after"}`)})
 	sync(t, mac, phone)
 	if got := items(t, phone, "history"); len(got) != 1 {
-		t.Fatalf("after clearing, the phone shows %d visits, want the one made after", len(got))
+		t.Fatalf("after deleting before now, the phone shows %d visits, want the one made after", len(got))
 	}
 }
 
@@ -571,7 +555,7 @@ func TestOwnPushDoesNotComeBack(t *testing.T) {
 			sealed, _ := e.key.Seal(theirs, false)
 			raw.Push(context.Background(), []synckosh.Item{sealed})
 		}}}}})
-	d := &device{busy, "busy", local}
+	d := &device{busy, "busy", local, client.Config{}}
 	sync(t, d) // pulls everything, with nothing to push
 	put(t, d, bookmark("root", "Mine"))
 	sync(t, d) // its push lands just after theirs, so the cursor stays

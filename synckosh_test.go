@@ -259,18 +259,28 @@ func TestValid(t *testing.T) {
 	if err := Valid(Item{Collection: KeysCollection, Datatype: SealedKeyDatatype, GUID: "g", Timestamp: 1}); err != nil {
 		t.Fatalf("a sealed copy: %v", err)
 	}
+	if err := Valid(Item{Collection: "history", Datatype: DeleteBeforeItem, GUID: DeleteBeforeItem, Timestamp: 1,
+		Public: json.RawMessage(`{"before":5}`)}); err != nil {
+		t.Fatalf("a delete-before: %v", err)
+	}
 	for name, change := range map[string]func(*Item){
-		"capital":              func(i *Item) { i.Collection = "Bookmarks" },
-		"newline":              func(i *Item) { i.Datatype = "a\nb" },
-		"reserved collection":  func(i *Item) { i.Collection = "_bookmarks" },
-		"reserved datatype":    func(i *Item) { i.Datatype = "_bookmark" },
-		"sealed key elsewhere": func(i *Item) { i.Datatype = SealedKeyDatatype },
-		"other type in keys":   func(i *Item) { i.Collection = KeysCollection },
-		"guid with underscore": func(i *Item) { i.GUID = "_g" },
-		"guid with a space":    func(i *Item) { i.GUID = "a b" },
-		"guid too long":        func(i *Item) { i.GUID = strings.Repeat("a", 129) },
-		"collection too long":  func(i *Item) { i.Collection = strings.Repeat("a", 65) },
-		"no timestamp":         func(i *Item) { i.Timestamp = 0 },
+		"capital":                 func(i *Item) { i.Collection = "Bookmarks" },
+		"newline":                 func(i *Item) { i.Datatype = "a\nb" },
+		"reserved collection":     func(i *Item) { i.Collection = "_bookmarks" },
+		"reserved datatype":       func(i *Item) { i.Datatype = "_bookmark" },
+		"sealed key elsewhere":    func(i *Item) { i.Datatype = SealedKeyDatatype },
+		"other type in keys":      func(i *Item) { i.Collection = KeysCollection },
+		"guid with underscore":    func(i *Item) { i.GUID = "_g" },
+		"guid with a space":       func(i *Item) { i.GUID = "a b" },
+		"guid too long":           func(i *Item) { i.GUID = strings.Repeat("a", 129) },
+		"collection too long":     func(i *Item) { i.Collection = strings.Repeat("a", 65) },
+		"no timestamp":            func(i *Item) { i.Timestamp = 0 },
+		"delete-before guid only": func(i *Item) { i.GUID = DeleteBeforeItem },
+		"delete-before type only": func(i *Item) { i.Datatype = DeleteBeforeItem; i.Public = json.RawMessage(`{"before":1}`) },
+		"delete-before deleted": func(i *Item) {
+			i.Datatype, i.GUID, i.Deleted, i.Public = DeleteBeforeItem, DeleteBeforeItem, true, json.RawMessage(`{"before":1}`)
+		},
+		"delete-before without a cutoff": func(i *Item) { i.Datatype, i.GUID = DeleteBeforeItem, DeleteBeforeItem },
 	} {
 		it := ok
 		change(&it)

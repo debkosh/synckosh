@@ -218,6 +218,52 @@ func (t *storeTx) Put(items []synckosh.Item) error {
 	return t.bkt.Put([]byte("last"), u64(last))
 }
 
+func (t *storeTx) RemoveBefore(collection string, before int64) error {
+	bk, _ := sub(t.tx, false, "b", t.bucket, "c", collection)
+	if bk == nil {
+		return nil
+	}
+	_, err := remove(t.bkt.Bucket([]byte("seq")), bk, func(it synckosh.Item) bool {
+		return it.GUID != synckosh.DeleteBeforeItem && it.Timestamp <= before
+	})
+	return err
+}
+
+// remove removes a collection's items that gone says to, from the collection and from the
+// bucket-wide index all. It returns how many.
+func remove(all, collection *bbolt.Bucket, gone func(synckosh.Item) bool) (int, error) {
+	byGUID, bySeq := collection.Bucket([]byte("items")), collection.Bucket([]byte("seq"))
+	if byGUID == nil {
+		return 0, nil
+	}
+	var rm [][2][]byte
+	err := byGUID.ForEach(func(guid, v []byte) error {
+		var it synckosh.Item
+		if err := json.Unmarshal(v, &it); err != nil {
+			return err
+		}
+		if gone(it) {
+			rm = append(rm, [2][]byte{bytes.Clone(guid), u64(it.Sequence)})
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	for _, g := range rm {
+		if err := byGUID.Delete(g[0]); err != nil {
+			return 0, err
+		}
+		if err := bySeq.Delete(g[1]); err != nil {
+			return 0, err
+		}
+		if err := all.Delete(g[1]); err != nil {
+			return 0, err
+		}
+	}
+	return len(rm), nil
+}
+
 func (s *Store) Since(bucket, collection string, after uint64, fn func(synckosh.Item) bool) error {
 	return s.db.View(func(tx *bbolt.Tx) error {
 		read := func(collection, guid []byte) (bool, error) {
@@ -265,40 +311,16 @@ func (s *Store) Cleanup(deletedBefore int64) (int, error) {
 		}
 		return buckets.ForEachBucket(func(name []byte) error {
 			bkt := buckets.Bucket(name)
-			collections, all := bkt.Bucket([]byte("c")), bkt.Bucket([]byte("seq"))
+			collections := bkt.Bucket([]byte("c"))
 			if collections == nil {
 				return nil
 			}
 			return collections.ForEachBucket(func(name []byte) error {
-				bk := collections.Bucket(name)
-				byGUID, bySeq := bk.Bucket([]byte("items")), bk.Bucket([]byte("seq"))
-				var gone [][2][]byte
-				err := byGUID.ForEach(func(guid, v []byte) error {
-					var it synckosh.Item
-					if err := json.Unmarshal(v, &it); err != nil {
-						return err
-					}
-					if it.Deleted && it.DeletedAt < deletedBefore {
-						gone = append(gone, [2][]byte{bytes.Clone(guid), u64(it.Sequence)})
-					}
-					return nil
+				m, err := remove(bkt.Bucket([]byte("seq")), collections.Bucket(name), func(it synckosh.Item) bool {
+					return it.Deleted && it.DeletedAt < deletedBefore
 				})
-				if err != nil {
-					return err
-				}
-				for _, g := range gone {
-					if err := byGUID.Delete(g[0]); err != nil {
-						return err
-					}
-					if err := bySeq.Delete(g[1]); err != nil {
-						return err
-					}
-					if err := all.Delete(g[1]); err != nil {
-						return err
-					}
-				}
-				n += len(gone)
-				return nil
+				n += m
+				return err
 			})
 		})
 	})
@@ -365,6 +387,30 @@ func (l *Local) Put(entries ...client.Entry) error {
 			}
 			if err != nil {
 				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (l *Local) Remove(collection string, guids ...string) error {
+	if len(guids) == 0 {
+		return nil
+	}
+	return l.db.Update(func(tx *bbolt.Tx) error {
+		items, _ := sub(tx, false, "items", collection)
+		if items == nil {
+			return nil
+		}
+		pending, _ := sub(tx, false, "pending", collection)
+		for _, g := range guids {
+			if err := items.Delete([]byte(g)); err != nil {
+				return err
+			}
+			if pending != nil {
+				if err := pending.Delete([]byte(g)); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

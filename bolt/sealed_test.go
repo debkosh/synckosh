@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -67,7 +68,7 @@ func title(t *testing.T, d *device, guid string) string {
 	return s
 }
 
-// A server that doesn't hold the key can't strip, alter, move, delete or clear an item: the
+// A server that doesn't hold the key can't strip, alter, move or delete an item: the
 // device rejects what it sends, says so, and syncs on past it.
 func TestTamperedItemsAreRejected(t *testing.T) {
 	e := newEnv(t)
@@ -83,8 +84,9 @@ func TestTamperedItemsAreRejected(t *testing.T) {
 		"change its base":        func(i *synckosh.Item) { i.Base = 7 },
 		"move it to a new guid":  func(i *synckosh.Item) { i.GUID = synckosh.NewGUID() },
 		"move it elsewhere":      func(i *synckosh.Item) { i.Collection = "notes" },
-		"clear the collection": func(i *synckosh.Item) {
-			*i = synckosh.Item{Collection: "bookmarks", Datatype: client.ClearDatatype, GUID: synckosh.NewGUID(), Timestamp: later}
+		"delete everything before now": func(i *synckosh.Item) {
+			*i = synckosh.Item{Collection: "bookmarks", Datatype: synckosh.DeleteBeforeItem, GUID: synckosh.DeleteBeforeItem,
+				Timestamp: later, Public: json.RawMessage(fmt.Sprintf(`{"before":%d}`, real.Timestamp))}
 		},
 		"break a name": func(i *synckosh.Item) { i.Collection = "Bookmarks" },
 	} {
@@ -134,7 +136,7 @@ func TestThePublicPartOutsideTheSeal(t *testing.T) {
 }
 
 // An item under a key the device doesn't hold is locked. It changes nothing the device holds,
-// even as a delete or a clear, and sync goes on past it.
+// even as a delete or a delete-before, and sync goes on past it.
 func TestUnknownKeyIsLocked(t *testing.T) {
 	e := newEnv(t)
 	mac, phone := e.device("mac"), e.device("phone")
@@ -153,8 +155,9 @@ func TestUnknownKeyIsLocked(t *testing.T) {
 		s, _ := server.Seal(it, false)
 		forged = append(forged, s)
 	}
-	clear, _ := server.Seal(synckosh.Item{Collection: "bookmarks", Datatype: client.ClearDatatype, GUID: synckosh.NewGUID(), Timestamp: later}, false)
-	forge(t, e.store, append(forged, clear)...)
+	cut, _ := server.Seal(synckosh.Item{Collection: "bookmarks", Datatype: synckosh.DeleteBeforeItem, GUID: synckosh.DeleteBeforeItem,
+		Timestamp: later, Public: json.RawMessage(`{"before":1}`)}, false)
+	forge(t, e.store, append(forged, cut)...)
 	good := put(t, mac, bookmark("root", "Good"))
 	sync(t, mac, phone)
 
@@ -167,8 +170,8 @@ func TestUnknownKeyIsLocked(t *testing.T) {
 		t.Fatalf("the phone shows %d bookmarks, want the three and the good one", len(got))
 	}
 	locked, _ := phone.Locked("bookmarks")
-	if len(locked) != 1 || locked[0].GUID != clear.GUID {
-		t.Fatalf("locked: %+v, want only the clear, which the phone held no version of", locked)
+	if len(locked) != 1 || locked[0].GUID != cut.GUID {
+		t.Fatalf("locked: %+v, want only the delete-before, which the phone held no version of", locked)
 	}
 }
 
@@ -289,8 +292,9 @@ func (e *env) newServer() *Store {
 // reopen opens a device's replica again, on the env's server.
 func (e *env) reopen(d *device) {
 	e.t.Helper()
-	r, err := client.Open(client.Config{Client: &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}},
-		Local: d.local, Key: e.key})
+	cfg := d.cfg
+	cfg.Client, cfg.Local, cfg.Key = &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}, d.local, e.key
+	r, err := client.Open(cfg)
 	if err != nil {
 		e.t.Fatal(err)
 	}

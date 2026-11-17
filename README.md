@@ -22,7 +22,7 @@ is [SPEC.md](SPEC.md).
 | Package | What it is |
 |---|---|
 | `synckosh` | the item, timestamps, UUIDv7 guids, order keys, the data key and passphrase-sealed copies |
-| `client` | a device's `Replica`: put, delete, clear, read and sync every collection, over a `Local` store |
+| `client` | a device's `Replica`: put, delete, delete before a cutoff, read and sync every collection, over a `Local` store |
 | `server` | the server as an `http.Handler`, over a `Store`; signing in is the host's |
 | `bolt` | a `server.Store` and a `client.Local` in bbolt files |
 
@@ -64,7 +64,7 @@ go test ./...
 They sync devices through a real server and bbolt files: newest wins whichever device pushes
 first, and the later push in the same millisecond; edits to different items all survive; the server's file
 never holds a private part in the clear; a new store id refills the server, with a new device
-getting the data as it comes back; 2,500 items page without loss; clearing a collection; reopening a
+getting the data as it comes back; 2,500 items page without loss; deleting before a cutoff; reopening a
 device; retries, old versions, timestamps too far ahead and other buckets; cleanup; a device not pulling its own push back, unless another push came in between; a clock
 two days ahead refused with a clear error, then healing; and joining with only a passphrase.
 

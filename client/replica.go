@@ -25,6 +25,7 @@ type Entry struct {
 type Local interface {
 	Get(collection, guid string) (Entry, bool, error)
 	Put(entries ...Entry) error
+	Remove(collection string, guids ...string) error
 	// Each calls fn for every entry of a collection, or of every collection if collection is empty.
 	Each(collection string, fn func(Entry) error) error
 	// Pending returns the entries of every collection that the server doesn't have yet.
@@ -32,10 +33,6 @@ type Local interface {
 	Meta(key string) ([]byte, error) // nil if unset
 	SetMeta(key string, value []byte) error
 }
-
-// ClearDatatype is the datatype of an item that clears a collection: every item in the collection older than
-// it is gone. Clearing history is one such item, not one delete per visit.
-const ClearDatatype = "sync.clear"
 
 // ErrLocked is returned for an item sealed under a key this device doesn't hold: it can't be
 // read or changed here.
@@ -52,25 +49,31 @@ type Config struct {
 	// SealPublic lists the datatypes whose public part is sealed too, with a copy in the box, so
 	// the server can't change it. Otherwise only the private part and the item's fields are.
 	SealPublic map[string]bool
-	Limits     synckosh.Limits // this device's; zero fields take synckosh.DefaultLimits
+	// KeepDeleted keeps deleted items here, with their data, until the app calls Cleanup:
+	// Items hides them, Get reports them deleted, and putting one again restores it. Without it,
+	// a device removes an item once the server holds its delete, and removes a collection's
+	// items at or before a delete-before cutoff as soon as it writes or receives it.
+	KeepDeleted bool
+	Limits      synckosh.Limits // this device's; zero fields take synckosh.DefaultLimits
 }
 
 // Replica is one device's copy of a bucket. Its methods may be called from any goroutine,
 // one at a time.
 type Replica struct {
-	mu         sync.Mutex
-	c          *Client
-	local      Local
-	key        *synckosh.DataKey
-	sealPublic map[string]bool
-	limits     synckosh.Limits
-	clock      *synckosh.Clock
+	mu          sync.Mutex
+	c           *Client
+	local       Local
+	key         *synckosh.DataKey
+	sealPublic  map[string]bool
+	keepDeleted bool
+	limits      synckosh.Limits
+	clock       *synckosh.Clock
 }
 
 // Open opens a device's replica, with its clock where it left off.
 func Open(cfg Config) (*Replica, error) {
 	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, sealPublic: cfg.SealPublic,
-		limits: cfg.Limits.OrDefaults(), clock: synckosh.NewClock()}
+		keepDeleted: cfg.KeepDeleted, limits: cfg.Limits.OrDefaults(), clock: synckosh.NewClock()}
 	b, err := r.local.Meta("clock")
 	if err != nil {
 		return nil, err
@@ -115,6 +118,9 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 	defer r.mu.Unlock()
 	out := make([]synckosh.Item, len(its))
 	for i, it := range its {
+		if it.Datatype == synckosh.DeleteBeforeItem {
+			return nil, errors.New("put: a delete-before is written with DeleteBefore")
+		}
 		if it.GUID == "" {
 			it.GUID = synckosh.NewGUID()
 		}
@@ -137,8 +143,9 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 	return out, nil
 }
 
-// Delete marks an item deleted. It keeps its data, so it can be restored by putting it again,
-// until the server's cleanup removes it.
+// Delete marks an item deleted. The server keeps it, with its data, until its cleanup. This
+// device removes it once the server holds the delete, or with KeepDeleted keeps it, so putting it
+// again restores it.
 func (r *Replica) Delete(collection, guid string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -154,11 +161,69 @@ func (r *Replica) Delete(collection, guid string) error {
 	return r.write(it)
 }
 
-// Clear removes everything in a collection made before now, on every device.
-func (r *Replica) Clear(collection string) error {
+// DeleteBefore deletes every item of a collection with a timestamp at or before before, on every
+// device, in one item: the collection's delete-before. The server forgets those items at once,
+// and stores none at or before the cutoff again. The cutoff only moves forward: an earlier one
+// than the collection has changes nothing. An item edited after the cutoff lives as usual.
+func (r *Replica) DeleteBefore(collection string, before time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.write(synckosh.Item{Collection: collection, Datatype: ClearDatatype, GUID: synckosh.NewGUID()})
+	cutoff := before.UnixMilli()
+	if cutoff > time.Now().Add(synckosh.MaxAhead).UnixMilli() {
+		return fmt.Errorf("delete before %s: more than %s ahead", before, synckosh.MaxAhead)
+	}
+	old, has, err := r.local.Get(collection, synckosh.DeleteBeforeItem)
+	if err != nil {
+		return err
+	}
+	if old.Locked {
+		return fmt.Errorf("%s %s: %w", collection, synckosh.DeleteBeforeItem, ErrLocked)
+	}
+	it := synckosh.Item{Collection: collection, Datatype: synckosh.DeleteBeforeItem, GUID: synckosh.DeleteBeforeItem}
+	if has {
+		held, _ := synckosh.Cutoff(old.Item)
+		cutoff = max(cutoff, held)
+		it.Extra = old.Item.Extra
+	}
+	it.Public, _ = json.Marshal(map[string]int64{"before": cutoff})
+	if err := r.write(it); err != nil {
+		return err
+	}
+	return r.cut(it)
+}
+
+// cut follows a delete-before this device wrote or took. Its clock moves past the cutoff, so an
+// edit made from now on is after it; and unless the device keeps deleted items, it removes the
+// collection's entries at or before it.
+func (r *Replica) cut(it synckosh.Item) error {
+	cutoff, err := synckosh.Cutoff(it)
+	if err != nil {
+		return err
+	}
+	r.clock.Observe(cutoff)
+	if r.keepDeleted {
+		return nil
+	}
+	var gone []string
+	err = r.local.Each(it.Collection, func(e Entry) error {
+		if e.Item.GUID != synckosh.DeleteBeforeItem && e.Item.Timestamp <= cutoff {
+			gone = append(gone, e.Item.GUID)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return r.local.Remove(it.Collection, gone...)
+}
+
+// cutoff is a collection's delete-before cutoff, 0 if it has none this device can open.
+func (r *Replica) cutoff(collection string) (int64, error) {
+	e, has, err := r.local.Get(collection, synckosh.DeleteBeforeItem)
+	if err != nil || !has || e.Locked {
+		return 0, err
+	}
+	return synckosh.Cutoff(e.Item)
 }
 
 // write stores edits made here, all with one timestamp, so a write of many items doesn't move
@@ -199,44 +264,43 @@ func (r *Replica) check(it synckosh.Item) error {
 	return nil
 }
 
-// Get returns an item, deleted or not, or ErrLocked for one this device can't open.
+// Get returns an item, deleted or not, or ErrLocked for one this device can't open. An item at
+// or before its collection's delete-before cutoff is reported deleted.
 func (r *Replica) Get(collection, guid string) (synckosh.Item, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, has, err := r.local.Get(collection, guid)
-	if err == nil && e.Locked {
-		err = fmt.Errorf("%s %s: %w", collection, guid, ErrLocked)
+	if err != nil || !has {
+		return synckosh.Item{}, false, err
 	}
-	return e.Item, has, err
+	if e.Locked {
+		return e.Item, true, fmt.Errorf("%s %s: %w", collection, guid, ErrLocked)
+	}
+	cutoff, err := r.cutoff(collection)
+	if guid != synckosh.DeleteBeforeItem && e.Item.Timestamp <= cutoff {
+		e.Item.Deleted = true
+	}
+	return e.Item, true, err
 }
 
 // Items returns a collection's live items, in guid order, which is the order they were made.
-// Locked items are left out.
+// Deleted and locked items are left out, and so are items at or before the collection's
+// delete-before cutoff.
 func (r *Replica) Items(collection string) ([]synckosh.Item, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var all []synckosh.Item
-	var cleared int64
-	err := r.local.Each(collection, func(e Entry) error {
-		switch {
-		case e.Locked:
-		case e.Item.Datatype == ClearDatatype:
-			cleared = max(cleared, e.Item.Timestamp)
-		default:
-			all = append(all, e.Item)
-		}
-		return nil
-	})
+	cutoff, err := r.cutoff(collection)
 	if err != nil {
 		return nil, err
 	}
-	out := all[:0]
-	for _, it := range all {
-		if !it.Deleted && it.Timestamp > cleared {
-			out = append(out, it)
+	var out []synckosh.Item
+	err = r.local.Each(collection, func(e Entry) error {
+		if !e.Locked && !e.Item.Deleted && e.Item.GUID != synckosh.DeleteBeforeItem && e.Item.Timestamp > cutoff {
+			out = append(out, e.Item)
 		}
-	}
-	return out, nil
+		return nil
+	})
+	return out, err
 }
 
 // Locked returns a collection's items sealed under a key this device doesn't hold, as they
@@ -252,6 +316,52 @@ func (r *Replica) Locked(collection string) ([]synckosh.Item, error) {
 		return nil
 	})
 	return out, err
+}
+
+// Cleanup removes this device's entries deleted longer ago than age: by when the server stored
+// the delete if this device knows it, else by the delete's timestamp; for items at or before a
+// delete-before cutoff, by when the delete-before was written. Pending entries stay, as the
+// server doesn't have them yet. A device holds deleted entries only with KeepDeleted, and nothing
+// removes them but this: the app decides whether and when to call it. It returns how many it
+// removed.
+func (r *Replica) Cleanup(age time.Duration) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	before := time.Now().Add(-age).UnixMilli()
+	cuts := map[string]int64{} // by collection: the cutoff of a delete-before written before then
+	err := r.local.Each("", func(e Entry) error {
+		if !e.Locked && e.Item.GUID == synckosh.DeleteBeforeItem && e.Item.Timestamp < before {
+			cuts[e.Item.Collection], _ = synckosh.Cutoff(e.Item)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	gone := map[string][]string{}
+	n := 0
+	err = r.local.Each("", func(e Entry) error {
+		it := e.Item
+		deletedAt := it.DeletedAt
+		if deletedAt == 0 {
+			deletedAt = it.Timestamp
+		}
+		if !e.Pending && !e.Locked && it.GUID != synckosh.DeleteBeforeItem &&
+			(it.Deleted && deletedAt < before || it.Timestamp <= cuts[it.Collection]) {
+			gone[it.Collection] = append(gone[it.Collection], it.GUID)
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	for collection, guids := range gone {
+		if err := r.local.Remove(collection, guids...); err != nil {
+			return 0, err
+		}
+	}
+	return n, nil
 }
 
 // maxRounds bounds the pull and push rounds of one Sync. A round repeats only when the server
@@ -404,6 +514,48 @@ func (r *Replica) setCursor(n uint64) error {
 	return r.local.SetMeta("after", b)
 }
 
+// changes are what one page, or one push's answer, does to this device's entries, stored
+// together.
+type changes struct {
+	put  []Entry
+	gone map[string][]string // by collection: deleted, and this device doesn't keep deletes
+}
+
+func (ch *changes) remove(it synckosh.Item) {
+	if ch.gone == nil {
+		ch.gone = map[string][]string{}
+	}
+	ch.gone[it.Collection] = append(ch.gone[it.Collection], it.GUID)
+}
+
+// keep stores an entry, or removes it if it is deleted and this device doesn't keep deletes.
+func (r *Replica) keep(ch *changes, e Entry) {
+	if e.Item.Deleted && !e.Pending && !e.Locked && !r.keepDeleted {
+		ch.remove(e.Item)
+		return
+	}
+	ch.put = append(ch.put, e)
+}
+
+func (r *Replica) apply(ch changes) error {
+	if err := r.local.Put(ch.put...); err != nil {
+		return err
+	}
+	for collection, guids := range ch.gone {
+		if err := r.local.Remove(collection, guids...); err != nil {
+			return err
+		}
+	}
+	for _, e := range ch.put {
+		if !e.Locked && e.Item.GUID == synckosh.DeleteBeforeItem {
+			if err := r.cut(e.Item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (r *Replica) pull(ctx context.Context, rp *report) (restart bool, err error) {
 	after, err := r.cursor()
 	if err != nil {
@@ -422,17 +574,13 @@ func (r *Replica) pull(ctx context.Context, rp *report) (restart bool, err error
 			restart, after = true, 0
 			continue
 		}
-		var es []Entry
+		var ch changes
 		for _, it := range p.Items {
-			e, ok, err := r.take(it, rp)
-			if err != nil {
+			if err := r.take(it, rp, &ch); err != nil {
 				return false, err
 			}
-			if ok {
-				es = append(es, e)
-			}
 		}
-		if err := r.local.Put(es...); err != nil {
+		if err := r.apply(ch); err != nil {
 			return false, err
 		}
 		after = p.Next
@@ -445,40 +593,44 @@ func (r *Replica) pull(ctx context.Context, rp *report) (restart bool, err error
 	}
 }
 
-// take returns the entry to store for an item from the server, unless this device has a version
-// with a later timestamp. One made in the same millisecond is taken: the server's copy is the
-// one pushed last, and every device ends up with it.
+// take decides what an item from the server does here: it is taken, unless this device has a
+// version with a later timestamp. One made in the same millisecond is taken: the server's copy is
+// the one pushed last, and every device ends up with it.
 //
 // An item sealed under a key this device doesn't hold is locked. It is unverified, so it has no
 // effect: it is kept only where this device holds nothing it can open, or an older locked
 // version, and any version this device can open replaces it. An item that is invalid, not
 // sealed, or changed after it was sealed is rejected.
-func (r *Replica) take(remote synckosh.Item, rp *report) (Entry, bool, error) {
+func (r *Replica) take(remote synckosh.Item, rp *report, ch *changes) error {
 	if err := synckosh.Valid(remote); err != nil {
 		rp.reject(remote, err)
-		return Entry{}, false, nil
+		return nil
 	}
 	opened, err := r.open(remote)
 	locked := errors.Is(err, synckosh.ErrUnknownKey)
+	if err == nil {
+		err = synckosh.Valid(opened) // a delete-before's cutoff, from the box
+	}
 	if err != nil && !locked {
 		rp.reject(remote, err)
-		return Entry{}, false, nil
+		return nil
 	}
 	e, has, err := r.local.Get(remote.Collection, remote.GUID)
 	if err != nil {
-		return Entry{}, false, err
+		return err
 	}
 	if locked {
-		if has && (!e.Locked || e.Item.Timestamp > remote.Timestamp) {
-			return Entry{}, false, nil
+		if !has || e.Locked && e.Item.Timestamp <= remote.Timestamp {
+			ch.put = append(ch.put, Entry{Item: remote, Locked: true})
 		}
-		return Entry{Item: remote, Locked: true}, true, nil
+		return nil
 	}
 	r.clock.Observe(opened.Timestamp)
 	if has && !e.Locked && e.Item.Timestamp > opened.Timestamp {
-		return Entry{}, false, nil // this device's version is later, and is pushed
+		return nil // this device's version is later, and is pushed
 	}
-	return Entry{Item: opened}, true, nil
+	r.keep(ch, Entry{Item: opened})
+	return nil
 }
 
 // push sends what changed here, as many items at a time as the limits allow. When a push's
@@ -516,26 +668,27 @@ func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error
 		if changed {
 			return true, nil
 		}
-		var es []Entry
+		var ch changes
 		var lo, hi uint64
 		for i, rs := range res.Results {
 			switch {
 			case rs.OK:
+				// Stored, or, with no sequence number, at or before the collection's
+				// delete-before cutoff, which the server doesn't store again.
 				e := batch[i]
 				e.Item.Sequence, e.Pending = rs.Sequence, false
-				es = append(es, e)
+				r.keep(&ch, e)
+				if rs.Sequence == 0 {
+					continue
+				}
 				if lo == 0 || rs.Sequence < lo {
 					lo = rs.Sequence
 				}
 				hi = max(hi, rs.Sequence)
 			case rs.Current != nil:
 				// The server holds a later version: it wins, here too.
-				e, ok, err := r.take(*rs.Current, rp)
-				if err != nil {
+				if err := r.take(*rs.Current, rp, &ch); err != nil {
 					return false, err
-				}
-				if ok {
-					es = append(es, e)
 				}
 			default:
 				it := batch[i].Item
@@ -547,11 +700,11 @@ func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error
 					r.clock.Reset(res.Time)
 					e := batch[i]
 					e.Item.Timestamp = r.clock.Now()
-					es = append(es, e)
+					ch.put = append(ch.put, e)
 				}
 			}
 		}
-		if err := r.local.Put(es...); err != nil {
+		if err := r.apply(ch); err != nil {
 			return false, err
 		}
 		if lo == cur+1 {

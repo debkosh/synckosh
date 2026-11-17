@@ -46,6 +46,9 @@ type Tx interface {
 	Get(collection, guid string) (synckosh.Item, bool, error)
 	// Put stores items, each replacing its guid's version. Last becomes the highest stored.
 	Put(items []synckosh.Item) error
+	// RemoveBefore removes every item of a collection with a timestamp at or before before,
+	// except its synckosh.DeleteBeforeItem.
+	RemoveBefore(collection string, before int64) error
 }
 
 // Auth tells the server which bucket a request is for. It returns an error to refuse it.
@@ -141,8 +144,12 @@ func (s *Server) check(raw json.RawMessage, limits synckosh.Limits) (synckosh.It
 	if err := synckosh.Valid(it); err != nil {
 		return it, refused(synckosh.RefusedInvalid, err.Error())
 	}
-	if it.Timestamp > s.now().Add(synckosh.MaxAhead).UnixMilli() {
-		return it, refused(synckosh.RefusedTimestampAhead, "timestamp is more than a day ahead of the server's clock")
+	ahead := s.now().Add(synckosh.MaxAhead).UnixMilli()
+	if it.Timestamp > ahead {
+		return it, refused(synckosh.RefusedTimestampAhead, "timestamp is more than an hour ahead of the server's clock")
+	}
+	if cutoff, _ := synckosh.Cutoff(it); it.Datatype == synckosh.DeleteBeforeItem && cutoff > ahead {
+		return it, refused(synckosh.RefusedTimestampAhead, "the cutoff is more than an hour ahead of the server's clock")
 	}
 	it.Sequence, it.DeletedAt = 0, 0 // the server's to set
 	return it, nil
@@ -190,6 +197,12 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 
 // store keeps what a push brings, inside its bucket's Update: each item, unless the bucket holds
 // a version with a later timestamp. It numbers what it stores on from the bucket's last number.
+//
+// A collection's delete-before item is the one item the server reads. Storing one removes every
+// item of the collection at or before its cutoff, and from then on such an item is answered OK
+// and not stored, so a refill or a device away for long can't bring it back. A delete-before
+// with an earlier cutoff than the one held is answered with the one held: the cutoff only moves
+// forward.
 func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]synckosh.Result, error) {
 	seq, err := tx.Last()
 	if err != nil {
@@ -199,19 +212,45 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 	type key struct{ collection, guid string }
 	batch := map[key]int{} // items of this push already chosen to store, by index in out
 	var out []synckosh.Item
+	get := func(collection, guid string) (synckosh.Item, bool, error) {
+		if j, ok := batch[key{collection, guid}]; ok {
+			return out[j], true, nil
+		}
+		return tx.Get(collection, guid)
+	}
+	cutoffs := map[string]int64{} // by collection, 0 for none
+	cutoff := func(collection string) (int64, error) {
+		if c, ok := cutoffs[collection]; ok {
+			return c, nil
+		}
+		it, has, err := get(collection, synckosh.DeleteBeforeItem)
+		if err != nil || !has {
+			cutoffs[collection] = 0
+			return 0, err
+		}
+		cutoffs[collection], _ = synckosh.Cutoff(it)
+		return cutoffs[collection], nil
+	}
 	for i, it := range in {
 		if errs[i] != nil {
 			res[i] = *errs[i]
 			continue
 		}
-		k := key{it.Collection, it.GUID}
-		cur, has := synckosh.Item{}, false
-		if j, ok := batch[k]; ok {
-			cur, has = out[j], true
-		} else if cur, has, err = tx.Get(it.Collection, it.GUID); err != nil {
+		held, err := cutoff(it.Collection)
+		if err != nil {
 			return nil, err
 		}
-		if has && it.Timestamp < cur.Timestamp {
+		isCut := it.Datatype == synckosh.DeleteBeforeItem
+		if !isCut && it.Timestamp <= held {
+			res[i] = synckosh.Result{OK: true} // deleted already
+			continue
+		}
+		cur, has, err := get(it.Collection, it.GUID)
+		if err != nil {
+			return nil, err
+		}
+		newCut, _ := synckosh.Cutoff(it)
+		if has && (it.Timestamp < cur.Timestamp || isCut && newCut < held) {
 			c := cur
 			res[i] = synckosh.Result{Current: &c}
 			continue
@@ -226,18 +265,32 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 		}
 		seq++
 		it.Sequence = seq
-		if j, ok := batch[k]; ok {
+		if j, ok := batch[key{it.Collection, it.GUID}]; ok {
 			out[j] = it
 		} else {
-			batch[k] = len(out)
+			batch[key{it.Collection, it.GUID}] = len(out)
 			out = append(out, it)
+		}
+		if isCut {
+			cutoffs[it.Collection] = newCut
 		}
 		res[i] = synckosh.Result{OK: true, Sequence: seq}
 	}
 	if len(out) == 0 {
 		return res, nil
 	}
-	return res, tx.Put(out)
+	if err := tx.Put(out); err != nil {
+		return nil, err
+	}
+	// Remove what the push's delete-befores cover, its own earlier items included.
+	for _, it := range out {
+		if it.Datatype == synckosh.DeleteBeforeItem {
+			if err := tx.RemoveBefore(it.Collection, cutoffs[it.Collection]); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return res, nil
 }
 
 func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
