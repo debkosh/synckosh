@@ -1,62 +1,76 @@
 # synckosh
 
-Sync for apps that keep the user's data on their devices: bookmarks, settings, passwords, notes,
-anything. A small server keeps the newest version of each item, and never sees inside one.
-The data is sealed with a key that only the user's passphrase opens, as
+Sync for apps that keep the user's data on their devices: bookmarks, logins, settings, notes,
+anything. A small server keeps the newest version of each item, and never sees inside one. The
+private part of every item is sealed with a key that only the user's passphrases open, as
 [keykosh](https://github.com/sudiptadeb/keykosh) seals its keys.
 
-- **One shape for everything.** An item is a type, a guid, a timestamp, a deleted flag and data.
-- **One rule.** For each item the newest version wins, unless its type has a merger of its own.
-- **A server simple enough to keep compatible.** It stores items, numbers changes and checks
-  that each edit was made on the version it holds. Types, mergers and data are the clients'.
+- **One shape:** an item has a bucket, a type, a guid, a timestamp, a deleted flag, a public part
+  and a private part.
+- **One rule:** for each guid, the newest timestamp wins.
+- **Items, not relationships:** an item names its parent. Lists, objects and trees are built on
+  the device; an item whose parent is gone is an orphan, never deleted.
+- **The devices hold the real copy:** if the server loses data, it changes its store id and the
+  devices push everything back.
 
-The protocol is in [SPEC.md](SPEC.md). This repo holds it, the Go client library, and a
-reference server.
+The protocol is [SPEC.md](SPEC.md).
 
-## The library
+## Packages
+
+| Package | What it is |
+|---|---|
+| `synckosh` | the item, timestamps, UUIDv7 guids, order keys, the data key and passphrase-sealed copies |
+| `client` | a device's `Replica`: put, delete, clear, read and sync, over a `Local` store |
+| `server` | the server as an `http.Handler`, over a `Store`; signing in is the host's |
+| `bolt` | a `server.Store` and a `client.Local` in bbolt files |
+
+## A device
 
 ```go
-import "github.com/sudiptadeb/synckosh"
+local, _ := bolt.OpenLocal("sync.db")
+key, _ := synckosh.NewDataKey()             // or synckosh.OpenSealedCopy(item, passphrase)
+r, _ := client.Open(client.Config{
+	Client:  &client.Client{URL: "https://sync.example.com", HTTP: signedInHTTPClient},
+	Local:   local,
+	Key:     key,
+	Device:  "mac",
+	Buckets: []string{"keys", "bookmarks"},
+})
 
-client, acct, _ := synckosh.Signup(ctx, "https://sync.example.com", "MacBook Pro")
-keys, _ := synckosh.NewKeys()
-clock := synckosh.NewClock(acct.Device)
-r := synckosh.NewReplica(client, keys, clock)
-
-locked, _ := keys.Lock(passphrase, clock.Now()) // the key, sealed with the passphrase
-r.Put(locked.Type, locked.GUID, locked.Data)
-
-r.Put("bookmark", synckosh.NewGUID(), json.RawMessage(`{"title":"Go","url":"https://go.dev/"}`))
-r.Mergers["login"] = myLoginMerger // optional; the default is newest wins
+sealed, _ := key.SealedCopy(passphrase, "Main passphrase")
+r.Put(sealed)
+r.Put(synckosh.Item{Bucket: "bookmarks", Type: "bookmark",
+	Public:  json.RawMessage(`{"parent":"root","order":"V"}`),
+	Private: json.RawMessage(`{"title":"Go","url":"https://go.dev/"}`)})
 r.Sync(ctx)
 ```
 
-A second device gets a token from the first (`client.AddDevice`), reads the `sync.keys` item,
-and opens it with `synckosh.Unlock(item, passphrase)`.
+## A server
 
-Also in the package: `NewGUID` makes UUIDv7 guids, which sort by when they were made. `Between`
-makes an order key between two others, for lists.
-
-## The server
-
-```sh
-cd server && go build -o synckosh-server .
-./synckosh-server -addr 127.0.0.1:8484 -db sync.db
+```go
+store, _ := bolt.OpenStore("server.db")
+srv, _ := server.New(store, func(r *http.Request) (string, error) {
+	return accountFromYourSignIn(r)
+})
+http.ListenAndServe(":8484", srv)
 ```
 
-One binary and one SQLite file. Put TLS in front of it.
+`srv.ResetStore(account)` after any possible data loss, and `srv.Cleanup(90 * 24 * time.Hour)` now
+and then.
 
 ## Tests
 
 ```sh
-go test ./... && (cd server && go test ./...)
+go test ./...
 ```
 
-The server's tests sync two devices through a real server: a join with the passphrase, newest
-wins, a custom merger that keeps both devices' edits, a delete, a retry, a clock far ahead, a
-removed device, a waiting pull, and that the server never holds data in the clear.
+They sync devices through a real server and bbolt files: newest wins whichever device pushes
+first; a login whose fields and passwords are items keeps both devices' edits; the server's file
+never holds a private part in the clear; a new store id refills the server, with a new device
+getting the data as it comes back; 2,500 items page without loss; clearing a bucket; reopening a
+device; retries, old versions, timestamps too far ahead and other accounts; cleanup; and joining
+with only a passphrase.
 
-## Status
+## Not yet
 
-Version 1 of the protocol, as a first cut. Still to come: storing a device's token and key in
-the OS keychain, a device's replica on disk, and changing the key when a device is removed.
+Keeping the data key in the OS keychain, signing in, and changing the data key after a leak.

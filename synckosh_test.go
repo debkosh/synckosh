@@ -9,19 +9,19 @@ import (
 )
 
 func TestItemKeepsFieldsItDoesNotKnow(t *testing.T) {
-	in := `{"type":"bookmark","guid":"bm_1","ts":[5,1,"mac1",9],"deleted":false,"data":{"title":"Go"},"key":2,"seq":7}`
+	in := `{"bucket":"bookmarks","type":"bookmark","guid":"g1","ts":[5,1,"mac",9],"deleted":false,"public":{"parent":"f1"},"private":{"key":"k","box":"x"},"seen":7,"deleted_at":0,"later":2}`
 	var it Item
 	if err := json.Unmarshal([]byte(in), &it); err != nil {
 		t.Fatal(err)
 	}
-	if it.TS != (TS{5, 1, "mac1"}) || it.Seq != 7 || string(it.Extra["key"]) != "2" {
+	if it.TS != (TS{5, 1, "mac"}) || it.Seen != 7 || string(it.Extra["later"]) != "2" || string(it.Public) != `{"parent":"f1"}` {
 		t.Fatalf("read %+v", it)
 	}
 	out, err := json.Marshal(it)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"data":{"title":"Go"},"deleted":false,"guid":"bm_1","key":2,"seq":7,"ts":[5,1,"mac1"],"type":"bookmark"}`
+	want := `{"bucket":"bookmarks","deleted":false,"guid":"g1","later":2,"private":{"key":"k","box":"x"},"public":{"parent":"f1"},"seen":7,"ts":[5,1,"mac"],"type":"bookmark"}`
 	if string(out) != want {
 		t.Fatalf("wrote\n%s\nwant\n%s", out, want)
 	}
@@ -66,54 +66,63 @@ func TestClockNeverGoesBack(t *testing.T) {
 	}
 }
 
-func TestSealBindsTheEnvelope(t *testing.T) {
-	k, err := NewKeys()
+func TestSealBindsTheItem(t *testing.T) {
+	k, err := NewDataKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	it := Item{Type: "login", GUID: "lg_1", TS: TS{1, 0, "mac1"}, Data: json.RawMessage(`{"password":"hunter2"}`)}
+	it := Item{Bucket: "logins", Type: "login-field", GUID: "g1", TS: TS{1, 0, "mac"},
+		Public: json.RawMessage(`{"parent":"l1","key":"password"}`), Private: json.RawMessage(`{"value":"hunter2"}`)}
 	s, err := k.Seal(it)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if jsonEqual(s.Data, it.Data) {
-		t.Fatal("data not sealed")
+	if strings.Contains(string(s.Private), "hunter2") {
+		t.Fatal("private part not sealed")
 	}
 	o, err := k.Open(s)
-	if err != nil || !jsonEqual(o.Data, it.Data) {
-		t.Fatalf("open: %v %s", err, o.Data)
+	if err != nil || string(o.Private) != `{"value":"hunter2"}` {
+		t.Fatalf("open: %v %s", err, o.Private)
 	}
-	moved := s
-	moved.GUID = "lg_2"
-	if _, err := k.Open(moved); err == nil {
-		t.Fatal("sealed data opened under another guid")
+	for name, change := range map[string]func(*Item){
+		"guid":    func(i *Item) { i.GUID = "g2" },
+		"ts":      func(i *Item) { i.TS = TS{2, 0, "mac"} },
+		"public":  func(i *Item) { i.Public = json.RawMessage(`{"parent":"l2","key":"password"}`) },
+		"deleted": func(i *Item) { i.Deleted = true },
+	} {
+		c := s
+		change(&c)
+		if _, err := k.Open(c); err == nil {
+			t.Errorf("opened after the server changed its %s", name)
+		}
 	}
-	newer := s
-	newer.TS = TS{2, 0, "mac1"}
-	if _, err := k.Open(newer); err == nil {
-		t.Fatal("sealed data opened under a newer timestamp")
-	}
-	other, _ := NewKeys()
-	if _, err := other.Open(s); err == nil {
-		t.Fatal("opened with another key")
+	other, _ := NewDataKey()
+	if _, err := other.Open(s); !errors.Is(err, ErrUnknownKey) {
+		t.Fatalf("another key: %v", err)
 	}
 }
 
-func TestPassphrase(t *testing.T) {
-	k, _ := NewKeys()
-	item, err := k.Lock("correct horse battery staple", TS{1, 0, "mac1"})
+func TestSealedCopies(t *testing.T) {
+	k, _ := NewDataKey()
+	a, err := k.SealedCopy("correct horse battery staple", "Main")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Unlock(item, "wrong"); !errors.Is(err, ErrPassphrase) {
+	b, _ := k.SealedCopy("a second passphrase", "Spare")
+	if strings.Contains(string(a.Public), "correct") || a.Bucket != KeysBucket {
+		t.Fatalf("%s", a.Public)
+	}
+	if _, err := OpenSealedCopy(a, "wrong"); !errors.Is(err, ErrPassphrase) {
 		t.Fatalf("wrong passphrase: %v", err)
 	}
-	k2, err := Unlock(item, "correct horse battery staple")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if k2.key != k.key {
-		t.Fatal("unlocked a different key")
+	for _, c := range []struct {
+		it   Item
+		pass string
+	}{{a, "correct horse battery staple"}, {b, "a second passphrase"}} {
+		got, err := OpenSealedCopy(c.it, c.pass)
+		if err != nil || got.ID != k.ID || string(got.Bytes()) != string(k.Bytes()) {
+			t.Fatalf("%v %v", err, got)
+		}
 	}
 }
 

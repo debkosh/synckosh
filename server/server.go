@@ -1,63 +1,95 @@
-package main
+// Package server is the synckosh server as an http.Handler. It keeps, for each account, the
+// newest version of each item, and numbers every version it stores so clients can ask for what
+// is new. It never opens an item's private part. Who an account is, is the host's business:
+// it passes an Auth function. Storage is behind Store; package bolt has one.
+package server
 
 import (
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"log"
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/sudiptadeb/synckosh"
 )
 
-// Limits. Each is generous for a browser's data and keeps one account from filling the server.
+// Store keeps items. Every Put the server makes is one atomic write, and the server makes one
+// at a time. Items are stored as given, Seen and DeletedAt included.
+type Store interface {
+	// StoreID returns the account's store id, making one on first use.
+	StoreID(account string) (string, error)
+	// SetStoreID replaces the account's store id, telling its clients to push all they have.
+	SetStoreID(account, id string) error
+	Get(account, bucket, guid string) (synckosh.Item, bool, error)
+	Put(account string, items []synckosh.Item) error
+	// Since returns up to limit items of a bucket with Seen greater than after, lowest first.
+	Since(account, bucket string, after uint64, limit int) ([]synckosh.Item, error)
+	// LastSeen returns the highest Seen ever stored, across accounts.
+	LastSeen() (uint64, error)
+	// Cleanup removes deleted items whose DeletedAt is before the given time, in milliseconds.
+	Cleanup(deletedBefore int64) (int, error)
+}
+
+// Auth tells the server whose request this is. It returns an error to refuse it.
+type Auth func(r *http.Request) (account string, err error)
+
 const (
 	maxRequest  = 16 << 20 // bytes in one request
 	maxItem     = 1 << 20  // bytes in one item
-	maxPush     = 1000     // items in one push
-	pageSize    = 500      // items in one page of changes, by default
+	MaxPush     = 1000     // items in one push, stored in one write
+	pageSize    = 500
 	maxPageSize = 1000
-	maxWait     = 60 * time.Second
 )
 
-// Features lists what this server can do beyond version 1's core, for clients to check. A
-// later server adds to it and never takes away.
-var features = []string{"wait"}
+var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var guidRe = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
 
-var (
-	typeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-	guidRe = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
-)
+// Server serves the protocol. Writes go through one writer, which hands out Seen numbers in
+// the order they are stored.
+type Server struct {
+	store Store
+	auth  Auth
+	mux   *http.ServeMux
+	now   func() time.Time
 
-type server struct {
-	st  *store
-	mux *http.ServeMux
-	now func() time.Time
-
-	mu      sync.Mutex
-	changed map[string]chan struct{} // closed when an account's items change
+	write sync.Mutex // the one writer
+	last  uint64     // the last Seen handed out
 }
 
-func newServer(st *store) *server {
-	s := &server{st: st, mux: http.NewServeMux(), now: time.Now, changed: map[string]chan struct{}{}}
+// New makes a server on a store.
+func New(store Store, auth Auth) (*Server, error) {
+	last, err := store.LastSeen()
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{store: store, auth: auth, mux: http.NewServeMux(), now: time.Now, last: last}
 	s.mux.HandleFunc("GET /v1", s.info)
-	s.mux.HandleFunc("POST /v1/accounts", s.signup)
-	s.mux.HandleFunc("GET /v1/devices", s.authed(s.listDevices))
-	s.mux.HandleFunc("POST /v1/devices", s.authed(s.addDevice))
-	s.mux.HandleFunc("DELETE /v1/devices/{id}", s.authed(s.removeDevice))
-	s.mux.HandleFunc("POST /v1/items", s.authed(s.push))
-	s.mux.HandleFunc("GET /v1/items", s.authed(s.pull))
-	return s
+	s.mux.HandleFunc("POST /v1/push", s.authed(s.push))
+	s.mux.HandleFunc("GET /v1/pull", s.authed(s.pull))
+	return s, nil
 }
 
-func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequest)
 	s.mux.ServeHTTP(w, r)
+}
+
+// ResetStore gives an account a new store id. Its clients then push everything they have.
+// It is the one thing to do after the server may have lost any of the account's data.
+func (s *Server) ResetStore(account string) error {
+	s.write.Lock()
+	defer s.write.Unlock()
+	return s.store.SetStoreID(account, NewStoreID())
+}
+
+// Cleanup removes items deleted more than age ago.
+func (s *Server) Cleanup(age time.Duration) (int, error) {
+	s.write.Lock()
+	defer s.write.Unlock()
+	return s.store.Cleanup(s.now().Add(-age).UnixMilli())
 }
 
 func reply(w http.ResponseWriter, code int, v any) {
@@ -71,220 +103,193 @@ func fail(w http.ResponseWriter, code int, msg string) {
 }
 
 func internal(w http.ResponseWriter, r *http.Request, err error) {
-	log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
+	log.Printf("synckosh: %s %s: %v", r.Method, r.URL.Path, err)
 	fail(w, http.StatusInternalServerError, "server error")
 }
 
-func (s *server) info(w http.ResponseWriter, r *http.Request) {
-	reply(w, http.StatusOK, map[string]any{"version": 1, "features": features})
+func (s *Server) info(w http.ResponseWriter, r *http.Request) {
+	reply(w, http.StatusOK, map[string]any{"version": 1})
 }
 
-func readName(r *http.Request) (string, bool) {
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		return "", false
-	}
-	name := strings.TrimSpace(body.Name)
-	return name, name != "" && len(name) <= 100
-}
-
-func (s *server) signup(w http.ResponseWriter, r *http.Request) {
-	name, ok := readName(r)
-	if !ok {
-		fail(w, http.StatusBadRequest, "name: the device's name, 1 to 100 characters")
-		return
-	}
-	account, dev, token, err := s.st.signup(r.Context(), name)
-	if err != nil {
-		internal(w, r, err)
-		return
-	}
-	log.Printf("signup: account %s, device %s %q", account, dev, name)
-	reply(w, http.StatusCreated, map[string]string{"account": account, "device": dev, "token": token})
-}
-
-type caller struct{ account, device string }
-
-func (s *server) authed(h func(http.ResponseWriter, *http.Request, caller)) http.HandlerFunc {
+func (s *Server) authed(h func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !ok || token == "" {
-			fail(w, http.StatusUnauthorized, "no token")
+		account, err := s.auth(r)
+		if err != nil || account == "" {
+			fail(w, http.StatusUnauthorized, "not signed in")
 			return
 		}
-		account, dev, err := s.st.auth(r.Context(), token)
-		if errors.Is(err, sql.ErrNoRows) {
-			fail(w, http.StatusUnauthorized, "unknown token")
-			return
-		}
-		if err != nil {
-			internal(w, r, err)
-			return
-		}
-		h(w, r, caller{account, dev})
+		h(w, r, account)
 	}
 }
 
-func (s *server) listDevices(w http.ResponseWriter, r *http.Request, c caller) {
-	ds, err := s.st.devices(r.Context(), c.account)
-	if err != nil {
-		internal(w, r, err)
-		return
-	}
-	reply(w, http.StatusOK, map[string]any{"devices": ds})
+func (s *Server) storeID(account string) (string, error) {
+	s.write.Lock()
+	defer s.write.Unlock()
+	return s.store.StoreID(account)
 }
 
-func (s *server) addDevice(w http.ResponseWriter, r *http.Request, c caller) {
-	name, ok := readName(r)
-	if !ok {
-		fail(w, http.StatusBadRequest, "name: the device's name, 1 to 100 characters")
-		return
-	}
-	dev, token, err := s.st.addDevice(r.Context(), c.account, name)
-	if err != nil {
-		internal(w, r, err)
-		return
-	}
-	log.Printf("device added: account %s, device %s %q, by %s", c.account, dev, name, c.device)
-	reply(w, http.StatusCreated, map[string]string{"account": c.account, "device": dev, "token": token})
+// Result is the answer for one pushed item: stored with its Seen number, or not stored because
+// the server holds a newer version, returned in Current, or refused with an Error.
+type Result struct {
+	OK      bool           `json:"ok"`
+	Seen    uint64         `json:"seen,omitempty"`
+	Current *synckosh.Item `json:"current,omitempty"`
+	Error   string         `json:"error,omitempty"`
 }
 
-func (s *server) removeDevice(w http.ResponseWriter, r *http.Request, c caller) {
-	id := r.PathValue("id")
-	err := s.st.removeDevice(r.Context(), c.account, id)
-	if errors.Is(err, errNoDevice) {
-		fail(w, http.StatusNotFound, "no such device")
-		return
-	}
-	if err != nil {
-		internal(w, r, err)
-		return
-	}
-	log.Printf("device removed: account %s, device %s, by %s", c.account, id, c.device)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// check reads one pushed item's envelope. The body is stored as the device sent it, fields
-// this server doesn't know included, without its change number.
-func (s *server) check(raw json.RawMessage) incoming {
+func (s *Server) check(raw json.RawMessage) (synckosh.Item, string) {
 	if len(raw) > maxItem {
-		return incoming{err: "item over 1 MB"}
+		return synckosh.Item{}, "item over 1 MB"
 	}
 	var it synckosh.Item
 	if err := json.Unmarshal(raw, &it); err != nil {
-		return incoming{err: err.Error()}
+		return synckosh.Item{}, err.Error()
 	}
 	switch {
-	case !typeRe.MatchString(it.Type):
-		return incoming{err: "type: lowercase letters, digits, dot, dash or underscore, up to 64"}
+	case !nameRe.MatchString(it.Bucket):
+		return it, "bucket: lowercase letters, digits, dot, dash or underscore, up to 64"
+	case !nameRe.MatchString(it.Type):
+		return it, "type: lowercase letters, digits, dot, dash or underscore, up to 64"
 	case !guidRe.MatchString(it.GUID):
-		return incoming{err: "guid: letters, digits and ._:~- up to 128"}
+		return it, "guid: letters, digits and ._:~- up to 128"
 	case it.TS.MS <= 0 || it.TS.N < 0 || it.TS.Dev == "":
-		return incoming{err: "ts: [ms, n, device]"}
+		return it, "ts: [ms, n, device]"
 	case it.TS.MS > s.now().Add(synckosh.MaxAhead).UnixMilli():
-		return incoming{err: "ts is more than a day ahead of the server's clock"}
+		return it, "ts is more than a day ahead of the server's clock"
 	}
-	base := it.Base
-	it.Seq, it.Base = 0, 0
-	body, err := json.Marshal(it)
-	if err != nil {
-		return incoming{err: err.Error()}
-	}
-	it.Base = base
-	return incoming{it: it, body: body}
+	it.Seen, it.DeletedAt = 0, 0 // the server's to set
+	return it, ""
 }
 
-func (s *server) push(w http.ResponseWriter, r *http.Request, c caller) {
-	var req struct {
-		Items []json.RawMessage `json:"items"`
-	}
+type pushRequest struct {
+	Items []json.RawMessage `json:"items"`
+}
+
+func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
+	var req pushRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		fail(w, http.StatusBadRequest, "body: {\"items\": [...]}: "+err.Error())
+		fail(w, http.StatusBadRequest, `body: {"items": [...]}: `+err.Error())
 		return
 	}
-	if len(req.Items) > maxPush {
+	if len(req.Items) > MaxPush {
 		fail(w, http.StatusRequestEntityTooLarge, "more than 1000 items in one push")
 		return
 	}
-	in := make([]incoming, len(req.Items))
+	in := make([]synckosh.Item, len(req.Items))
+	errs := make([]string, len(req.Items))
 	for i, raw := range req.Items {
-		in[i] = s.check(raw)
+		in[i], errs[i] = s.check(raw)
 	}
-	res, changed, err := s.st.put(r.Context(), c.account, in)
+
+	s.write.Lock()
+	defer s.write.Unlock()
+	id, err := s.store.StoreID(account)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
-	if changed {
-		s.notify(c.account)
+	res := make([]Result, len(in))
+	type key struct{ bucket, guid string }
+	batch := map[key]int{} // items of this push already chosen to store, by index in out
+	var out []synckosh.Item
+	seen := s.last
+	now := s.now().UnixMilli()
+	for i, it := range in {
+		if errs[i] != "" {
+			res[i] = Result{Error: errs[i]}
+			continue
+		}
+		k := key{it.Bucket, it.GUID}
+		cur, has := synckosh.Item{}, false
+		if j, ok := batch[k]; ok {
+			cur, has = out[j], true
+		} else if cur, has, err = s.store.Get(account, it.Bucket, it.GUID); err != nil {
+			internal(w, r, err)
+			return
+		}
+		switch {
+		case has && cur.TS == it.TS:
+			res[i] = Result{OK: true, Seen: cur.Seen} // the same edit again: a retry
+			continue
+		case has && !it.TS.After(cur.TS):
+			c := cur
+			res[i] = Result{Current: &c}
+			continue
+		}
+		if it.Deleted {
+			it.DeletedAt = now
+			if has && cur.Deleted && cur.DeletedAt != 0 {
+				it.DeletedAt = cur.DeletedAt
+			}
+		}
+		seen++
+		it.Seen = seen
+		if j, ok := batch[k]; ok {
+			out[j] = it
+		} else {
+			batch[k] = len(out)
+			out = append(out, it)
+		}
+		res[i] = Result{OK: true, Seen: seen}
 	}
-	reply(w, http.StatusOK, map[string]any{"results": res})
+	if len(out) > 0 {
+		if err := s.store.Put(account, out); err != nil {
+			internal(w, r, err)
+			return
+		}
+		s.last = seen
+	}
+	reply(w, http.StatusOK, map[string]any{"store": id, "results": res})
 }
 
-func (s *server) pull(w http.ResponseWriter, r *http.Request, c caller) {
+func (s *Server) pull(w http.ResponseWriter, r *http.Request, account string) {
 	q := r.URL.Query()
-	since, err := strconv.ParseInt(q.Get("since"), 10, 64)
-	if q.Get("since") == "" {
-		since, err = 0, nil
-	}
-	if err != nil || since < 0 {
-		fail(w, http.StatusBadRequest, "since: a change number")
+	bucket := q.Get("bucket")
+	if !nameRe.MatchString(bucket) {
+		fail(w, http.StatusBadRequest, "bucket: the bucket to pull")
 		return
+	}
+	var after uint64
+	if v := q.Get("after"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			fail(w, http.StatusBadRequest, "after: a seen number")
+			return
+		}
+		after = n
 	}
 	limit := pageSize
 	if v := q.Get("limit"); v != "" {
-		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > maxPageSize {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxPageSize {
 			fail(w, http.StatusBadRequest, "limit: 1 to 1000")
 			return
 		}
+		limit = n
 	}
-	var wait time.Duration
-	if v := q.Get("wait"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			fail(w, http.StatusBadRequest, "wait: seconds")
-			return
-		}
-		wait = min(time.Duration(n)*time.Second, maxWait)
-	}
-	typ := q.Get("type")
-	ch := s.watch(c.account)
-	items, next, more, err := s.st.changes(r.Context(), c.account, since, typ, limit)
-	if err == nil && len(items) == 0 && wait > 0 {
-		select {
-		case <-ch:
-			items, next, more, err = s.st.changes(r.Context(), c.account, since, typ, limit)
-		case <-time.After(wait):
-		case <-r.Context().Done():
-			return
-		}
-	}
+	id, err := s.storeID(account)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
-	reply(w, http.StatusOK, map[string]any{"items": items, "next": next, "more": more})
+	items, err := s.store.Since(account, bucket, after, limit+1)
+	if err != nil {
+		internal(w, r, err)
+		return
+	}
+	more := len(items) > limit
+	if more {
+		items = items[:limit]
+	}
+	next := after
+	if len(items) > 0 {
+		next = items[len(items)-1].Seen
+	}
+	if items == nil {
+		items = []synckosh.Item{}
+	}
+	reply(w, http.StatusOK, map[string]any{"store": id, "items": items, "next": next, "more": more})
 }
 
-// watch returns a channel closed at the account's next change.
-func (s *server) watch(account string) <-chan struct{} {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ch, ok := s.changed[account]
-	if !ok {
-		ch = make(chan struct{})
-		s.changed[account] = ch
-	}
-	return ch
-}
-
-func (s *server) notify(account string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if ch, ok := s.changed[account]; ok {
-		close(ch)
-		delete(s.changed, account)
-	}
-}
+// NewStoreID makes a store id, for a Store to use when an account has none.
+func NewStoreID() string { return "s_" + synckosh.NewGUID() }

@@ -1,7 +1,6 @@
-// Package synckosh syncs items through a sync server. Everything synced is an Item: a type, a
-// guid, a timestamp, a deleted flag and the type's data. For each guid the newest item wins,
-// unless the type has its own Merger. The server sees the envelope; the data is sealed.
-// The protocol is in SPEC.md.
+// Package synckosh holds what clients and servers share: the item, its timestamp, guids,
+// order keys and the keys that seal an item's private part. The protocol is in SPEC.md; the
+// client is in package client and the server in package server.
 package synckosh
 
 import (
@@ -11,8 +10,7 @@ import (
 	"sort"
 )
 
-// TS orders items: the wall clock in milliseconds, a counter for edits in the same
-// millisecond or after a newer timestamp was seen, and the device, which breaks ties.
+// TS is when an edit was made: the device's clock in milliseconds, a counter, and the device.
 // On the wire it is [ms, n, "device"].
 type TS struct {
 	MS  int64
@@ -37,7 +35,7 @@ func (t TS) MarshalJSON() ([]byte, error) {
 	return json.Marshal([]any{t.MS, t.N, t.Dev})
 }
 
-// UnmarshalJSON reads [ms, n, "device"]. Elements a later version may add are ignored.
+// UnmarshalJSON reads [ms, n, "device"]. Elements a later version adds are ignored.
 func (t *TS) UnmarshalJSON(b []byte) error {
 	var a []json.RawMessage
 	if err := json.Unmarshal(b, &a); err != nil {
@@ -60,55 +58,50 @@ func (t *TS) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Item is one synced thing. Fields a later version adds to the envelope are kept in Extra and
-// written back unchanged, so an older device never strips them.
+// Item is one synced thing. Public is plain: the server and a device that hasn't unlocked can
+// read it. Private is plain on the device and sealed on the wire. Seen and DeletedAt are set
+// by the server. Fields a later version adds are kept in Extra and written back unchanged.
 type Item struct {
-	Type    string
-	GUID    string
-	TS      TS
-	Deleted bool
-	Data    json.RawMessage
-	Seq     int64 // the server's change number; set on items the server returns
-	Base    int64 // on a push: the change number of the server's item this edit was made on, 0 for none
-	Extra   map[string]json.RawMessage
+	Bucket    string
+	Type      string
+	GUID      string
+	TS        TS
+	Deleted   bool
+	Public    json.RawMessage
+	Private   json.RawMessage
+	Seen      uint64 // the server's change number for this version
+	DeletedAt int64  // the server's clock, in milliseconds, when it stored the delete
+	Extra     map[string]json.RawMessage
 }
 
-var envelope = map[string]bool{"type": true, "guid": true, "ts": true, "deleted": true, "data": true, "seq": true, "base": true}
+var known = map[string]bool{"bucket": true, "type": true, "guid": true, "ts": true, "deleted": true,
+	"public": true, "private": true, "seen": true, "deleted_at": true}
 
 func (it Item) MarshalJSON() ([]byte, error) {
-	m := make(map[string]json.RawMessage, len(it.Extra)+6)
+	m := make(map[string]json.RawMessage, len(it.Extra)+9)
 	for k, v := range it.Extra {
 		m[k] = v
 	}
-	put := func(k string, v any) error {
-		b, err := json.Marshal(v)
+	set := func(k string, v any) {
+		b, _ := json.Marshal(v)
 		m[k] = b
-		return err
 	}
-	if err := put("type", it.Type); err != nil {
-		return nil, err
+	set("bucket", it.Bucket)
+	set("type", it.Type)
+	set("guid", it.GUID)
+	set("ts", it.TS)
+	set("deleted", it.Deleted)
+	if len(it.Public) > 0 {
+		m["public"] = it.Public
 	}
-	if err := put("guid", it.GUID); err != nil {
-		return nil, err
+	if len(it.Private) > 0 {
+		m["private"] = it.Private
 	}
-	if err := put("ts", it.TS); err != nil {
-		return nil, err
+	if it.Seen != 0 {
+		set("seen", it.Seen)
 	}
-	if err := put("deleted", it.Deleted); err != nil {
-		return nil, err
-	}
-	if len(it.Data) > 0 {
-		m["data"] = it.Data
-	}
-	if it.Seq != 0 {
-		if err := put("seq", it.Seq); err != nil {
-			return nil, err
-		}
-	}
-	if it.Base != 0 {
-		if err := put("base", it.Base); err != nil {
-			return nil, err
-		}
+	if it.DeletedAt != 0 {
+		set("deleted_at", it.DeletedAt)
 	}
 	return marshalSorted(m)
 }
@@ -119,26 +112,26 @@ func (it *Item) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	var v Item
-	get := func(k string, dst any) error {
-		raw, ok := m[k]
-		if !ok {
-			return nil
-		}
-		if err := json.Unmarshal(raw, dst); err != nil {
-			return fmt.Errorf("item %s: %w", k, err)
-		}
-		return nil
-	}
-	for k, dst := range map[string]any{"type": &v.Type, "guid": &v.GUID, "ts": &v.TS, "deleted": &v.Deleted, "seq": &v.Seq, "base": &v.Base} {
-		if err := get(k, dst); err != nil {
-			return err
+	fields := map[string]any{"bucket": &v.Bucket, "type": &v.Type, "guid": &v.GUID, "ts": &v.TS,
+		"deleted": &v.Deleted, "seen": &v.Seen, "deleted_at": &v.DeletedAt}
+	for k, dst := range fields {
+		if raw, ok := m[k]; ok {
+			if err := json.Unmarshal(raw, dst); err != nil {
+				return fmt.Errorf("item %s: %w", k, err)
+			}
 		}
 	}
-	if d, ok := m["data"]; ok && !bytes.Equal(d, []byte("null")) {
-		v.Data = d
+	for _, k := range []string{"public", "private"} {
+		if raw, ok := m[k]; ok && !bytes.Equal(raw, []byte("null")) {
+			if k == "public" {
+				v.Public = raw
+			} else {
+				v.Private = raw
+			}
+		}
 	}
 	for k, raw := range m {
-		if !envelope[k] {
+		if !known[k] {
 			if v.Extra == nil {
 				v.Extra = map[string]json.RawMessage{}
 			}
@@ -149,7 +142,7 @@ func (it *Item) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// marshalSorted writes a map with its keys in order, so the same item is always the same bytes.
+// marshalSorted writes a map with its keys in order, so one item is always the same bytes.
 func marshalSorted(m map[string]json.RawMessage) ([]byte, error) {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -165,31 +158,26 @@ func marshalSorted(m map[string]json.RawMessage) ([]byte, error) {
 		kb, _ := json.Marshal(k)
 		buf.Write(kb)
 		buf.WriteByte(':')
-		var c bytes.Buffer
-		if err := json.Compact(&c, m[k]); err != nil {
+		if err := json.Compact(&buf, m[k]); err != nil {
 			return nil, fmt.Errorf("item %s: %w", k, err)
 		}
-		buf.Write(c.Bytes())
 	}
 	buf.WriteByte('}')
 	return buf.Bytes(), nil
 }
 
-// sameValue reports whether two items say the same thing, whatever their timestamps.
-func sameValue(a, b Item) bool {
-	if a.Deleted != b.Deleted {
-		return false
+// bound is what an item's seal binds its private part to: everything the device wrote but
+// the private part itself.
+func bound(it Item) []byte {
+	var pub bytes.Buffer
+	if len(it.Public) > 0 {
+		if json.Compact(&pub, it.Public) != nil {
+			pub.Reset()
+			pub.Write(it.Public)
+		}
+	} else {
+		pub.WriteString("null")
 	}
-	if a.Deleted {
-		return true
-	}
-	return jsonEqual(a.Data, b.Data)
-}
-
-func jsonEqual(a, b json.RawMessage) bool {
-	var x, y bytes.Buffer
-	if json.Compact(&x, a) != nil || json.Compact(&y, b) != nil {
-		return bytes.Equal(a, b)
-	}
-	return bytes.Equal(x.Bytes(), y.Bytes())
+	b, _ := json.Marshal([]any{it.Bucket, it.Type, it.GUID, it.TS, it.Deleted, json.RawMessage(pub.Bytes())})
+	return b
 }

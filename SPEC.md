@@ -1,149 +1,172 @@
 # synckosh protocol, version 1
 
-How a device syncs items through a synckosh server. The Go package in this repo is the
-reference client, and `server/` is the reference server.
+How devices sync an account's data through a synckosh server. The Go packages in this repo are
+the reference: `client` for a device, `server` for the server, `bolt` for storage on both.
 
 ## The model
 
-Everything synced is an **item**: a type, a guid, a timestamp, a deleted flag and the type's
-data. Items live in buckets by type. For each type and guid there is one current item.
-
-- **Making something:** the device makes a new guid.
-- **Changing something:** the device keeps the guid it synced with.
-- **Deleting:** the item stays, marked deleted, with no data, so every device learns of it.
-- **When two devices changed one item:** the type's merger decides. The default merger takes
-  the item with the newer timestamp. A type can have its own merger; the server never needs to
-  know.
-- **What belongs to the type:** parent and child, order in a list, and what its data means.
-  Sync only moves items.
-
-The server never sees inside the data. Devices seal it with a key that only the account's
-passphrase opens.
+- **Everything is an item.** An item has a bucket, a type, a guid, a timestamp, a deleted flag,
+  a public part and a private part.
+- **For each guid, the item with the newest timestamp wins.** That is all the server does with
+  items. It never opens a private part.
+- **Items know their parent; sync knows only items.** An item may name a parent in its public
+  part. Sync never follows it. Lists, objects and trees are built by the client from the items
+  that name a parent.
+- **Orphans stay.** An item whose parent is missing or deleted is still alive. Nothing is ever
+  deleted because of another item. Each type decides how its orphans show: a bookmark at the top
+  level, a login field not at all.
+- **Deletes are updates.** A deleted item stays, marked deleted, so every device hears of it.
+  Only the server's cleanup removes items, long after they were deleted.
+- **The devices hold the real copy.** If the server loses anything, devices push it back.
 
 ## The item
 
 ```json
 {
-  "type": "bookmark",
+  "bucket": "logins",
+  "type": "login-field",
   "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d07",
-  "ts": [1763376127123, 0, "d_qm53mdauGC7vF2k_"],
+  "ts": [1763380800000, 0, "mac"],
   "deleted": false,
-  "data": "seal1:Qm9hcmQ...",
-  "seq": 42
+  "public": {"parent": "019a8f3c-5e1f-7a10-8b2e-1c5d0f3a9e42", "key": "password"},
+  "private": {"key": "k_sUwGzUYSPw", "box": "7lg3iKfl2s0W…"},
+  "seen": 42,
+  "deleted_at": 1763390000000
 }
 ```
 
-| Field | What it is |
-|---|---|
-| `type` | the bucket: lowercase letters, digits, `.`, `-` or `_`, up to 64. `sync.keys` is reserved. |
-| `guid` | letters, digits and `._:~-`, up to 128. |
-| `ts` | when the edit was made: `[ms, n, device]`, see below. |
-| `deleted` | true for a deleted item, which has no `data`. |
-| `data` | the type's data, sealed: a string `seal1:` and base64. |
-| `seq` | set by the server: the change number at which it stored this version. |
-| `base` | sent by a device on a push: the `seq` of the version this edit was made on, or 0 for none. |
+| Field | Set by | What it is |
+|---|---|---|
+| `bucket` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of buckets only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64. |
+| `type` | device | what the item is, for the client: `folder`, `bookmark`, `login`, `login-field`. Same characters. |
+| `guid` | device | a UUIDv7 for a new item ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), so guids sort by when they were made. An edit keeps the guid. Letters, digits, `._:~-`, up to 128. |
+| `ts` | device | when the edit was made: `[ms, n, device]`. |
+| `deleted` | device | true for a deleted item. |
+| `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |
+| `private` | device | JSON sealed with the account's data key. |
+| `seen` | server | the server's number for this version, from one counter that only goes up. |
+| `deleted_at` | server | the server's clock, in milliseconds, when it first stored the item deleted. |
 
-### Guids
-
-A new item's guid is a **UUIDv7** ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), which
-sorts by when it was made. Items that are the same thing on every device get a fixed guid
-instead, such as `setting:theme` or `tabs:<device>`, so two devices don't make two of them.
+Fields a reader doesn't know are kept and written back unchanged, by the server and by clients.
 
 ### Timestamps
 
-`[ms, n, device]`: the wall clock in milliseconds, a counter, and the device's id. Timestamps
-compare by `ms`, then `n`, then `device`. A device:
+`[ms, n, device]` compares by `ms`, then `n`, then `device`. A device's timestamps:
+- never go below one it has made or read, counting up `n` when its clock hasn't moved past
+  the newest it has seen;
+- don't follow a timestamp more than a day ahead of its own clock.
 
-- never writes a timestamp lower than one it has written or read: it takes the larger of its
-  clock and the newest it has seen, and counts up `n` when that is not later than its last;
-- doesn't follow a timestamp more than a day ahead of its own clock.
+The server refuses items more than a day ahead of its own clock.
 
-So an edit made after seeing another always sorts after it, whatever the wall clocks say. The
-server refuses items more than a day ahead of its own clock.
+### Public and private parts
 
-### Order in a list
+The private part is sealed with XChaCha20-Poly1305 under the account's data key:
+`{"key": "<data key id>", "box": "<base64 of 24-byte nonce and ciphertext>"}`. The additional
+data is the JSON array `[bucket, type, guid, ts, deleted, public]`, so the server can't change
+the public part, or move a private part to another item, without the device noticing.
 
-An item in a list keeps its own **order key** in its data, never a list of children in its
-parent. Adding or moving one item then changes only that item, and two devices adding to one
-list both keep their adds.
+Structure is public and content is private. For example:
 
-- An order key is a string that sorts with plain byte order. `Between(a, b)` makes one between
-  two others.
-- Two devices may give two items the same key. A list shows its items by order key, then by
-  guid, which is when each was made. Duplicates are fine.
-- Any device may later give items new keys, to tidy a list. That is an ordinary edit, and the
-  list settles.
+| Type | Public | Private |
+|---|---|---|
+| folder, bookmark | parent, order | title, URL |
+| login | | origin |
+| login-field | parent, field name | value |
+| visit, tab | | everything |
+| setting | name | value |
 
-### Sealed data
+### Lists, objects and trees
 
-The account's key is 32 random bytes. `data` is sealed with XChaCha20-Poly1305 under that key.
-The sealed bytes are a 24-byte nonce, then the ciphertext. The additional data is
-`type`, `guid`, `ts` as JSON and `deleted` ("true" or "false"), joined with a zero byte. So the
-server can't move sealed data to another item or another timestamp.
+- **A list** is the items that name one parent, sorted by their order key, then by guid. Two
+  devices may give two items the same order key; both show, and any device may later give them
+  new keys as an ordinary edit. `synckosh.Between` makes a key between two others.
+- **An object** is the same, with the field's name as the key. When one key appears twice, the
+  type shows the newest, and a device may delete the other.
+- **A tree** is a list whose children can be parents. An item whose parents loop, or never reach
+  the top, is an orphan.
+- **A value that must never be lost,** such as a password, is never edited: each new value is a
+  new item under its parent, and the type shows the newest. Two devices changing it at once both
+  keep theirs.
 
-The key itself is the one item not sealed with it: type `sync.keys`, guid `keys`. Its data is a
-base64 string of the key encrypted with an [age](https://age-encryption.org) scrypt passphrase
-recipient, as [keykosh](https://github.com/sudiptadeb/keykosh) seals its identity. A new device
-reads that item, asks for the passphrase and opens it. Changing the passphrase writes the item
-again.
+### Clearing a bucket
+
+An item of type `sync.clear` in a bucket means everything in that bucket made before it is gone.
+Clearing history is one such item, not one delete per visit.
+
+## Keys
+
+- **One data key per account** seals every private part. Devices keep it in the OS keychain.
+- **Each passphrase seals its own copy** of the data key, as an item in the `keys` bucket, type
+  `sealed-key`. Its public part holds what a new device needs: the label, the data key's id, and
+  the Argon2id settings and salt. Its private part is the data key sealed with XChaCha20-Poly1305
+  under the passphrase's Argon2id key, with the data key's id as additional data.
+- **Joining a device:** it pulls the `keys` bucket, asks for a passphrase, opens a copy, and keeps
+  the data key.
+- **Adding, changing or removing a passphrase** is putting, editing or deleting its copy.
+- **Changing the data key** after a leak means sealing every item again under a new key, as
+  ordinary edits. Each private part names its key, so a device meeting a key it doesn't have
+  asks for the passphrase again.
 
 ## The server
 
-The server keeps, for each account, the current item for each type and guid, and a change number
-that goes up by one for each item it stores. JSON over HTTPS. Every call but the first two needs
-`Authorization: Bearer <token>`.
+JSON over HTTPS. Signing in is the host's business: the server asks it which account a request
+belongs to, and every account's items are apart.
 
 | Call | What it does |
 |---|---|
-| `GET /v1` | `{"version": 1, "features": ["wait"]}` |
-| `POST /v1/accounts` `{"name"}` | a new account with this device in it: `{"account", "device", "token"}` |
-| `GET /v1/devices` | `{"devices": [{"id", "name", "created"}]}` |
-| `POST /v1/devices` `{"name"}` | a token for another device: `{"account", "device", "token"}` |
-| `DELETE /v1/devices/{id}` | ends that device's token |
-| `POST /v1/items` `{"items": [...]}` | push, below |
-| `GET /v1/items?since=&type=&limit=&wait=` | pull, below |
+| `GET /v1` | `{"version": 1}` |
+| `POST /v1/push` `{"items": [...]}` | push, below |
+| `GET /v1/pull?bucket=&after=&limit=` | pull, below |
+
+Every answer to push and pull carries `store`: the account's store id.
 
 ### Push
 
-Up to 1000 items, each up to 1 MB. For each item the server answers, in order:
+Up to 1000 items, each up to 1 MB, stored in one write. The server has one writer. For each
+item, in order:
 
-- `{"ok": true, "seq": n}`: stored. It is stored if there is no item with that guid yet, or if
-  its `base` is the `seq` of the item the server holds.
-- `{"ok": true, "seq": n}` too, if the server holds an item with the same `ts`: a device's
-  timestamp names one edit, so this is a retry.
-- `{"ok": false, "current": {...}}`: the server holds a version this edit wasn't made on. The
-  device merges its item with `current`, using the type's merger, and pushes the result with
-  `base` set to `current.seq`.
-- `{"ok": false, "error": "..."}`: the item is wrong, for example a `ts` too far ahead.
-
-The server stores each item as the device sent it, fields it doesn't know included, without
-`seq` and `base`.
+- **Stored** — there is no item with that guid, or the one there is older:
+  `{"ok": true, "seen": n}`. The server gives it the next `seen` number, and sets `deleted_at`
+  if it is deleted.
+- **A retry** — the server holds an item with the same `ts`. A timestamp names one edit, so this
+  is a success: `{"ok": true, "seen": n}`.
+- **Older** — the server holds a newer version: `{"ok": false, "current": {...}}`. The device
+  takes `current`.
+- **Refused** — the item is wrong, such as a timestamp too far ahead:
+  `{"ok": false, "error": "..."}`.
 
 ### Pull
 
-The items stored after change number `since`, oldest change first, of one type if `type` is
-given, up to `limit` (default 500, at most 1000):
-`{"items": [...], "next": n, "more": bool}`. The device keeps `next` and passes it as `since`
-next time. With `wait` (seconds, at most 60) and nothing new, the server holds the request until
-something changes.
+The items of one bucket with `seen` greater than `after`, lowest first, up to `limit` (default
+500, at most 1000): `{"store", "items": [...], "next": n, "more": bool}`. The device keeps
+`next` for that bucket and passes it as `after` next time.
 
-## A device's sync, step by step
+The pull goes by when the server stored an item, not by when it was made, so an old item pushed
+back later still reaches every device.
 
-1. Push the items changed here, each with `base`.
-2. For each `current` that comes back, merge, and keep the result to push.
-3. Pull from the last `next`. For each item: if it wasn't changed here, take it. If it was,
-   merge.
-4. Merging: if the merger's result says the same as the server's item, take the server's. If it
-   says the same as the local item and the local one is newer, push the local one. Otherwise the
-   result is a new edit, with a new timestamp.
-5. Repeat until nothing is left to push.
+### The store id
+
+The server makes a store id for each account. It changes it, `server.ResetStore`, whenever it
+may have lost any of that account's data: a wipe, a restore from a backup, a move to a new host.
+A device that sees a store id it didn't sync with last pushes everything it has, live and
+deleted, with the timestamps they were made with, and reads every bucket from the start. Newest
+wins settles the rest. A new device meanwhile gets what is there, then the rest as it arrives.
+
+### Cleanup
+
+The server removes items deleted more than a set time ago, such as 90 days. A device away longer
+than that may keep items that were deleted meanwhile.
+
+## A device's sync
+
+1. Pull each bucket from its `next`. Take each item, unless this device has a newer version.
+2. If the store id changed, mark everything pending and start again from the beginning.
+3. Push everything changed here. For each `current` that comes back, take it.
+4. Keep the clock, the store id and each bucket's `next`.
 
 ## Staying compatible
 
-- New types need no change to the server.
-- The server keeps envelope fields it doesn't know, and clients keep them when they write an
-  item back. So a newer client can add a field and an older one won't strip it.
-- A merger that reads `data` keeps the fields it doesn't know, for the same reason.
-- `ts` may gain elements after the third. Readers ignore them.
-- The server adds to `features` and never takes away. A change that would break a version 1
-  client is version 2, under `/v2`.
+- New buckets and types need no change to the server.
+- Fields a reader doesn't know are kept and written back.
+- `ts` may gain elements after the third; readers ignore them.
+- A change that would break a version 1 client is version 2, under `/v2`.

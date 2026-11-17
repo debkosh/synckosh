@@ -47,3 +47,11 @@ func (c *Clock) Observe(t TS) {
 		c.last = TS{MS: t.MS, N: t.N, Dev: c.dev}
 	}
 }
+
+// Last returns the newest timestamp this clock has made or observed, for the device to keep
+// so the clock never goes back after a restart.
+func (c *Clock) Last() TS {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.last
+}
