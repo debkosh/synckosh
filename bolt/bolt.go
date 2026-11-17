@@ -24,7 +24,7 @@ func open(path string) (*bbolt.DB, error) {
 	return bbolt.Open(path, 0o600, &bbolt.Options{Timeout: 5 * time.Second})
 }
 
-// sub returns a nested bucket, made if write is true; nil if it doesn't exist and write is false.
+// sub returns a nested bbolt bucket, made if write is true; nil if it doesn't exist and write is false.
 func sub(tx *bbolt.Tx, write bool, names ...string) (*bbolt.Bucket, error) {
 	var b *bbolt.Bucket
 	for i, n := range names {
@@ -59,9 +59,10 @@ func u64(n uint64) []byte {
 	return b
 }
 
-// Store is a server.Store. Per account, "a/<account>" holds the store id, the last sequence
-// number, "seq" (sequence number to bucket and guid, across buckets) and, for each sync bucket,
-// "b/<bucket>" with "items" (guid to item) and "seq" (sequence number to guid).
+// Store is a server.Store. For each sync bucket, "b/<bucket>" holds the store id, the last
+// sequence number, "seq" (sequence number to collection and guid, across collections) and, for
+// each collection, "c/<collection>" with "items" (guid to item) and "seq" (sequence number to
+// guid).
 type Store struct{ db *bbolt.DB }
 
 func OpenStore(path string) (*Store, error) {
@@ -74,10 +75,10 @@ func OpenStore(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) StoreID(account string) (string, error) {
+func (s *Store) StoreID(bucket string) (string, error) {
 	var id string
 	err := s.db.View(func(tx *bbolt.Tx) error {
-		b, _ := sub(tx, false, "a", account)
+		b, _ := sub(tx, false, "b", bucket)
 		if b != nil {
 			id = string(b.Get([]byte("store")))
 		}
@@ -87,12 +88,12 @@ func (s *Store) StoreID(account string) (string, error) {
 		return id, err
 	}
 	id = server.NewStoreID()
-	return id, s.SetStoreID(account, id)
+	return id, s.SetStoreID(bucket, id)
 }
 
-func (s *Store) SetStoreID(account, id string) error {
+func (s *Store) SetStoreID(bucket, id string) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
-		b, err := sub(tx, true, "a", account)
+		b, err := sub(tx, true, "b", bucket)
 		if err != nil {
 			return err
 		}
@@ -100,11 +101,11 @@ func (s *Store) SetStoreID(account, id string) error {
 	})
 }
 
-func (s *Store) Get(account, bucket, guid string) (synckosh.Item, bool, error) {
+func (s *Store) Get(bucket, collection, guid string) (synckosh.Item, bool, error) {
 	var it synckosh.Item
 	var has bool
 	err := s.db.View(func(tx *bbolt.Tx) error {
-		b, _ := sub(tx, false, "a", account, "b", bucket, "items")
+		b, _ := sub(tx, false, "b", bucket, "c", collection, "items")
 		if b == nil {
 			return nil
 		}
@@ -118,25 +119,25 @@ func (s *Store) Get(account, bucket, guid string) (synckosh.Item, bool, error) {
 	return it, has, err
 }
 
-// ref is how the account-wide index names an item: its bucket and guid.
-func ref(bucket, guid string) []byte { return []byte(bucket + "\x00" + guid) }
+// ref is how the bucket-wide index names an item: its collection and guid.
+func ref(collection, guid string) []byte { return []byte(collection + "\x00" + guid) }
 
-func (s *Store) Put(account string, items []synckosh.Item) error {
+func (s *Store) Put(bucket string, items []synckosh.Item) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
-		acct, err := sub(tx, true, "a", account)
+		bkt, err := sub(tx, true, "b", bucket)
 		if err != nil {
 			return err
 		}
-		all, err := acct.CreateBucketIfNotExists([]byte("seq"))
+		all, err := bkt.CreateBucketIfNotExists([]byte("seq"))
 		if err != nil {
 			return err
 		}
 		var last uint64
-		if v := acct.Get([]byte("last")); v != nil {
+		if v := bkt.Get([]byte("last")); v != nil {
 			last = binary.BigEndian.Uint64(v)
 		}
 		for _, it := range items {
-			bk, err := sub(tx, true, "a", account, "b", it.Bucket)
+			bk, err := sub(tx, true, "b", bucket, "c", it.Collection)
 			if err != nil {
 				return err
 			}
@@ -170,41 +171,41 @@ func (s *Store) Put(account string, items []synckosh.Item) error {
 			if err := bySeq.Put(u64(it.Sequence), []byte(it.GUID)); err != nil {
 				return err
 			}
-			if err := all.Put(u64(it.Sequence), ref(it.Bucket, it.GUID)); err != nil {
+			if err := all.Put(u64(it.Sequence), ref(it.Collection, it.GUID)); err != nil {
 				return err
 			}
 			last = max(last, it.Sequence)
 		}
-		return acct.Put([]byte("last"), u64(last))
+		return bkt.Put([]byte("last"), u64(last))
 	})
 }
 
-func (s *Store) Since(account, bucket string, after uint64, limit int) ([]synckosh.Item, error) {
+func (s *Store) Since(bucket, collection string, after uint64, limit int) ([]synckosh.Item, error) {
 	var out []synckosh.Item
 	err := s.db.View(func(tx *bbolt.Tx) error {
-		read := func(bucket, guid []byte) error {
+		read := func(collection, guid []byte) error {
 			var it synckosh.Item
-			bk, _ := sub(tx, false, "a", account, "b", string(bucket), "items")
+			bk, _ := sub(tx, false, "b", bucket, "c", string(collection), "items")
 			if err := json.Unmarshal(bk.Get(guid), &it); err != nil {
 				return err
 			}
 			out = append(out, it)
 			return nil
 		}
-		if bucket != "" {
-			bk, _ := sub(tx, false, "a", account, "b", bucket, "seq")
+		if collection != "" {
+			bk, _ := sub(tx, false, "b", bucket, "c", collection, "seq")
 			if bk == nil {
 				return nil
 			}
 			c := bk.Cursor()
 			for k, guid := c.Seek(u64(after + 1)); k != nil && len(out) < limit; k, guid = c.Next() {
-				if err := read([]byte(bucket), guid); err != nil {
+				if err := read([]byte(collection), guid); err != nil {
 					return err
 				}
 			}
 			return nil
 		}
-		all, _ := sub(tx, false, "a", account, "seq")
+		all, _ := sub(tx, false, "b", bucket, "seq")
 		if all == nil {
 			return nil
 		}
@@ -220,11 +221,11 @@ func (s *Store) Since(account, bucket string, after uint64, limit int) ([]syncko
 	return out, err
 }
 
-func (s *Store) LastSequence(account string) (uint64, error) {
+func (s *Store) LastSequence(bucket string) (uint64, error) {
 	var last uint64
 	err := s.db.View(func(tx *bbolt.Tx) error {
-		if acct, _ := sub(tx, false, "a", account); acct != nil {
-			if v := acct.Get([]byte("last")); v != nil {
+		if bkt, _ := sub(tx, false, "b", bucket); bkt != nil {
+			if v := bkt.Get([]byte("last")); v != nil {
 				last = binary.BigEndian.Uint64(v)
 			}
 		}
@@ -236,18 +237,18 @@ func (s *Store) LastSequence(account string) (uint64, error) {
 func (s *Store) Cleanup(deletedBefore int64) (int, error) {
 	n := 0
 	err := s.db.Update(func(tx *bbolt.Tx) error {
-		accounts := tx.Bucket([]byte("a"))
-		if accounts == nil {
+		buckets := tx.Bucket([]byte("b"))
+		if buckets == nil {
 			return nil
 		}
-		return accounts.ForEachBucket(func(name []byte) error {
-			acct := accounts.Bucket(name)
-			buckets, all := acct.Bucket([]byte("b")), acct.Bucket([]byte("seq"))
-			if buckets == nil {
+		return buckets.ForEachBucket(func(name []byte) error {
+			bkt := buckets.Bucket(name)
+			collections, all := bkt.Bucket([]byte("c")), bkt.Bucket([]byte("seq"))
+			if collections == nil {
 				return nil
 			}
-			return buckets.ForEachBucket(func(name []byte) error {
-				bk := buckets.Bucket(name)
+			return collections.ForEachBucket(func(name []byte) error {
+				bk := collections.Bucket(name)
 				byGUID, bySeq := bk.Bucket([]byte("items")), bk.Bucket([]byte("seq"))
 				var gone [][2][]byte
 				err := byGUID.ForEach(func(guid, v []byte) error {
@@ -282,7 +283,7 @@ func (s *Store) Cleanup(deletedBefore int64) (int, error) {
 	return n, err
 }
 
-// Local is a client.Local: "items/<bucket>" (guid to entry), "pending/<bucket>" (guid) and
+// Local is a client.Local: "items/<collection>" (guid to entry), "pending/<collection>" (guid) and
 // "meta".
 type Local struct{ db *bbolt.DB }
 
@@ -296,11 +297,11 @@ func OpenLocal(path string) (*Local, error) {
 
 func (l *Local) Close() error { return l.db.Close() }
 
-func (l *Local) Get(bucket, guid string) (client.Entry, bool, error) {
+func (l *Local) Get(collection, guid string) (client.Entry, bool, error) {
 	var e client.Entry
 	var has bool
 	err := l.db.View(func(tx *bbolt.Tx) error {
-		b, _ := sub(tx, false, "items", bucket)
+		b, _ := sub(tx, false, "items", collection)
 		if b == nil {
 			return nil
 		}
@@ -320,11 +321,11 @@ func (l *Local) Put(entries ...client.Entry) error {
 	}
 	return l.db.Update(func(tx *bbolt.Tx) error {
 		for _, e := range entries {
-			items, err := sub(tx, true, "items", e.Item.Bucket)
+			items, err := sub(tx, true, "items", e.Item.Collection)
 			if err != nil {
 				return err
 			}
-			pending, err := sub(tx, true, "pending", e.Item.Bucket)
+			pending, err := sub(tx, true, "pending", e.Item.Collection)
 			if err != nil {
 				return err
 			}
@@ -348,7 +349,7 @@ func (l *Local) Put(entries ...client.Entry) error {
 	})
 }
 
-func (l *Local) Each(bucket string, fn func(client.Entry) error) error {
+func (l *Local) Each(collection string, fn func(client.Entry) error) error {
 	return l.db.View(func(tx *bbolt.Tx) error {
 		each := func(b *bbolt.Bucket) error {
 			return b.ForEach(func(_, v []byte) error {
@@ -359,8 +360,8 @@ func (l *Local) Each(bucket string, fn func(client.Entry) error) error {
 				return fn(e)
 			})
 		}
-		if bucket != "" {
-			b, _ := sub(tx, false, "items", bucket)
+		if collection != "" {
+			b, _ := sub(tx, false, "items", collection)
 			if b == nil {
 				return nil
 			}

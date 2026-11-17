@@ -9,7 +9,7 @@ import (
 )
 
 func TestItemKeepsFieldsItDoesNotKnow(t *testing.T) {
-	in := `{"bucket":"bookmarks","type":"bookmark","guid":"g1","timestamp":5,"deleted":false,"public":{"parent":"f1"},"private":{"key":"k","box":"x"},"sequence":7,"deleted_at":0,"later":2}`
+	in := `{"collection":"bookmarks","datatype":"bookmark","guid":"g1","timestamp":5,"deleted":false,"public":{"parent":"f1"},"private":{"key":"k","box":"x"},"sequence":7,"deleted_at":0,"later":2}`
 	var it Item
 	if err := json.Unmarshal([]byte(in), &it); err != nil {
 		t.Fatal(err)
@@ -21,7 +21,7 @@ func TestItemKeepsFieldsItDoesNotKnow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"bucket":"bookmarks","deleted":false,"guid":"g1","later":2,"private":{"key":"k","box":"x"},"public":{"parent":"f1"},"sequence":7,"timestamp":5,"type":"bookmark"}`
+	want := `{"collection":"bookmarks","datatype":"bookmark","deleted":false,"guid":"g1","later":2,"private":{"key":"k","box":"x"},"public":{"parent":"f1"},"sequence":7,"timestamp":5}`
 	if string(out) != want {
 		t.Fatalf("wrote\n%s\nwant\n%s", out, want)
 	}
@@ -54,7 +54,7 @@ func TestSealBindsTheItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	it := Item{Bucket: "logins", Type: "login-field", GUID: "g1", Timestamp: 1,
+	it := Item{Collection: "logins", Datatype: "login-field", GUID: "g1", Timestamp: 1,
 		Public: json.RawMessage(`{"parent":"l1","key":"password"}`), Private: json.RawMessage(`{"value":"hunter2"}`)}
 	s, err := k.Seal(it)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestSealedCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := k.SealedCopy("a second passphrase", "Spare")
-	if strings.Contains(string(a.Public), "correct") || a.Bucket != KeysBucket {
+	if strings.Contains(string(a.Public), "correct") || a.Collection != KeysCollection {
 		t.Fatalf("%s", a.Public)
 	}
 	if _, err := OpenSealedCopy(a, "wrong"); !errors.Is(err, ErrPassphrase) {

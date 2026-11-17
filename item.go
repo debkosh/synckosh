@@ -14,19 +14,19 @@ import (
 // read it. Private is plain on the device and sealed on the wire. Sequence and DeletedAt are set
 // by the server. Fields a later version adds are kept in Extra and written back unchanged.
 type Item struct {
-	Bucket    string
-	Type      string
-	GUID      string
-	Timestamp int64 // when the edit was made, the device's clock in milliseconds
-	Deleted   bool
-	Public    json.RawMessage
-	Private   json.RawMessage
-	Sequence  uint64 // the server's sequence number for this version
-	DeletedAt int64  // the server's clock, in milliseconds, when it stored the delete
-	Extra     map[string]json.RawMessage
+	Collection string
+	Datatype   string
+	GUID       string
+	Timestamp  int64 // when the edit was made, the device's clock in milliseconds
+	Deleted    bool
+	Public     json.RawMessage
+	Private    json.RawMessage
+	Sequence   uint64 // the server's sequence number for this version
+	DeletedAt  int64  // the server's clock, in milliseconds, when it stored the delete
+	Extra      map[string]json.RawMessage
 }
 
-var known = map[string]bool{"bucket": true, "type": true, "guid": true, "timestamp": true, "deleted": true,
+var known = map[string]bool{"collection": true, "datatype": true, "guid": true, "timestamp": true, "deleted": true,
 	"public": true, "private": true, "sequence": true, "deleted_at": true}
 
 func (it Item) MarshalJSON() ([]byte, error) {
@@ -38,8 +38,8 @@ func (it Item) MarshalJSON() ([]byte, error) {
 		b, _ := json.Marshal(v)
 		m[k] = b
 	}
-	set("bucket", it.Bucket)
-	set("type", it.Type)
+	set("collection", it.Collection)
+	set("datatype", it.Datatype)
 	set("guid", it.GUID)
 	set("timestamp", it.Timestamp)
 	set("deleted", it.Deleted)
@@ -64,7 +64,7 @@ func (it *Item) UnmarshalJSON(b []byte) error {
 		return err
 	}
 	var v Item
-	fields := map[string]any{"bucket": &v.Bucket, "type": &v.Type, "guid": &v.GUID, "timestamp": &v.Timestamp,
+	fields := map[string]any{"collection": &v.Collection, "datatype": &v.Datatype, "guid": &v.GUID, "timestamp": &v.Timestamp,
 		"deleted": &v.Deleted, "sequence": &v.Sequence, "deleted_at": &v.DeletedAt}
 	for k, dst := range fields {
 		if raw, ok := m[k]; ok {
@@ -130,7 +130,7 @@ func bound(it Item) []byte {
 	} else {
 		pub.WriteString("null")
 	}
-	b, _ := json.Marshal([]any{it.Bucket, it.Type, it.GUID, it.Timestamp, it.Deleted, json.RawMessage(pub.Bytes())})
+	b, _ := json.Marshal([]any{it.Collection, it.Datatype, it.GUID, it.Timestamp, it.Deleted, json.RawMessage(pub.Bytes())})
 	return b
 }
 
@@ -141,6 +141,6 @@ const (
 	RefusedTimestampAhead = "timestamp-ahead"
 	// RefusedTooBig: the item is over 1 MB.
 	RefusedTooBig = "too-big"
-	// RefusedInvalid: a field is malformed, such as a bucket name with capitals.
+	// RefusedInvalid: a field is malformed, such as a collection name with capitals.
 	RefusedInvalid = "invalid"
 )

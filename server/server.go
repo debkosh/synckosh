@@ -1,7 +1,8 @@
-// Package server is the synckosh server as an http.Handler. It keeps, for each account, the
+// Package server is the synckosh server as an http.Handler. It keeps, for each bucket, the
 // newest version of each item, and numbers every version it stores so clients can ask for what
-// is new. It never opens an item's private part. Who an account is, is the host's business:
-// it passes an Auth function. Storage is behind Store; package bolt has one.
+// is new. It never opens an item's private part. A bucket is whatever the host makes it: one
+// person's data, a shared list, a family's. Which bucket a request may use is the host's
+// business: it passes an Auth function. Storage is behind Store; package bolt has one.
 package server
 
 import (
@@ -19,23 +20,23 @@ import (
 // Store keeps items. Every Put the server makes is one atomic write, and the server makes one
 // at a time. Items are stored as given, Sequence and DeletedAt included.
 type Store interface {
-	// StoreID returns the account's store id, making one on first use.
-	StoreID(account string) (string, error)
-	// SetStoreID replaces the account's store id, telling its clients to push all they have.
-	SetStoreID(account, id string) error
-	Get(account, bucket, guid string) (synckosh.Item, bool, error)
-	Put(account string, items []synckosh.Item) error
+	// StoreID returns the bucket's store id, making one on first use.
+	StoreID(bucket string) (string, error)
+	// SetStoreID replaces the bucket's store id, telling its clients to push all they have.
+	SetStoreID(bucket, id string) error
+	Get(bucket, collection, guid string) (synckosh.Item, bool, error)
+	Put(bucket string, items []synckosh.Item) error
 	// Since returns up to limit items with a sequence number greater than after, lowest first:
-	// of one bucket, or of every bucket if bucket is empty.
-	Since(account, bucket string, after uint64, limit int) ([]synckosh.Item, error)
-	// LastSequence returns the highest sequence number stored for the account, 0 if none.
-	LastSequence(account string) (uint64, error)
+	// of one collection, or of every collection if collection is empty.
+	Since(bucket, collection string, after uint64, limit int) ([]synckosh.Item, error)
+	// LastSequence returns the highest sequence number stored for the bucket, 0 if none.
+	LastSequence(bucket string) (uint64, error)
 	// Cleanup removes deleted items whose DeletedAt is before the given time, in milliseconds.
 	Cleanup(deletedBefore int64) (int, error)
 }
 
-// Auth tells the server whose request this is. It returns an error to refuse it.
-type Auth func(r *http.Request) (account string, err error)
+// Auth tells the server which bucket a request is for. It returns an error to refuse it.
+type Auth func(r *http.Request) (bucket string, err error)
 
 const (
 	maxRequest  = 16 << 20 // bytes in one request
@@ -48,7 +49,7 @@ const (
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 var guidRe = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
 
-// Server serves the protocol. Writes go through one writer, which hands out each account's
+// Server serves the protocol. Writes go through one writer, which hands out each bucket's
 // sequence numbers in the order its items are stored, with no gaps within one push.
 type Server struct {
 	store Store
@@ -73,12 +74,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-// ResetStore gives an account a new store id. Its clients then push everything they have.
-// It is the one thing to do after the server may have lost any of the account's data.
-func (s *Server) ResetStore(account string) error {
+// ResetStore gives a bucket a new store id. Its clients then push everything they have.
+// It is the one thing to do after the server may have lost any of the bucket's data.
+func (s *Server) ResetStore(bucket string) error {
 	s.write.Lock()
 	defer s.write.Unlock()
-	return s.store.SetStoreID(account, NewStoreID())
+	return s.store.SetStoreID(bucket, NewStoreID())
 }
 
 // Cleanup removes items deleted more than age ago.
@@ -109,19 +110,19 @@ func (s *Server) info(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) authed(h func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		account, err := s.auth(r)
-		if err != nil || account == "" {
+		bucket, err := s.auth(r)
+		if err != nil || bucket == "" {
 			fail(w, http.StatusUnauthorized, "not signed in")
 			return
 		}
-		h(w, r, account)
+		h(w, r, bucket)
 	}
 }
 
-func (s *Server) storeID(account string) (string, error) {
+func (s *Server) storeID(bucket string) (string, error) {
 	s.write.Lock()
 	defer s.write.Unlock()
-	return s.store.StoreID(account)
+	return s.store.StoreID(bucket)
 }
 
 // Result is the answer for one pushed item: stored with its sequence number, or not stored because
@@ -146,10 +147,10 @@ func (s *Server) check(raw json.RawMessage) (synckosh.Item, *Result) {
 		return synckosh.Item{}, refused(synckosh.RefusedInvalid, err.Error())
 	}
 	switch {
-	case !nameRe.MatchString(it.Bucket):
-		return it, refused(synckosh.RefusedInvalid, "bucket: lowercase letters, digits, dot, dash or underscore, up to 64")
-	case !nameRe.MatchString(it.Type):
-		return it, refused(synckosh.RefusedInvalid, "type: lowercase letters, digits, dot, dash or underscore, up to 64")
+	case !nameRe.MatchString(it.Collection):
+		return it, refused(synckosh.RefusedInvalid, "collection: lowercase letters, digits, dot, dash or underscore, up to 64")
+	case !nameRe.MatchString(it.Datatype):
+		return it, refused(synckosh.RefusedInvalid, "datatype: lowercase letters, digits, dot, dash or underscore, up to 64")
 	case !guidRe.MatchString(it.GUID):
 		return it, refused(synckosh.RefusedInvalid, "guid: letters, digits and ._:~- up to 128")
 	case it.Timestamp <= 0:
@@ -165,7 +166,7 @@ type pushRequest struct {
 	Items []json.RawMessage `json:"items"`
 }
 
-func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
+func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 	var req pushRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		fail(w, http.StatusBadRequest, `body: {"items": [...]}: `+err.Error())
@@ -183,18 +184,18 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 
 	s.write.Lock()
 	defer s.write.Unlock()
-	id, err := s.store.StoreID(account)
+	id, err := s.store.StoreID(bucket)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
-	seq, err := s.store.LastSequence(account)
+	seq, err := s.store.LastSequence(bucket)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
 	res := make([]Result, len(in))
-	type key struct{ bucket, guid string }
+	type key struct{ collection, guid string }
 	batch := map[key]int{} // items of this push already chosen to store, by index in out
 	var out []synckosh.Item
 	now := s.now().UnixMilli()
@@ -203,11 +204,11 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 			res[i] = *errs[i]
 			continue
 		}
-		k := key{it.Bucket, it.GUID}
+		k := key{it.Collection, it.GUID}
 		cur, has := synckosh.Item{}, false
 		if j, ok := batch[k]; ok {
 			cur, has = out[j], true
-		} else if cur, has, err = s.store.Get(account, it.Bucket, it.GUID); err != nil {
+		} else if cur, has, err = s.store.Get(bucket, it.Collection, it.GUID); err != nil {
 			internal(w, r, err)
 			return
 		}
@@ -235,7 +236,7 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 		res[i] = Result{OK: true, Sequence: seq}
 	}
 	if len(out) > 0 {
-		if err := s.store.Put(account, out); err != nil {
+		if err := s.store.Put(bucket, out); err != nil {
 			internal(w, r, err)
 			return
 		}
@@ -243,11 +244,11 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, account string) {
 	reply(w, http.StatusOK, map[string]any{"store": id, "time": now, "results": res})
 }
 
-func (s *Server) pull(w http.ResponseWriter, r *http.Request, account string) {
+func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
 	q := r.URL.Query()
-	bucket := q.Get("bucket")
-	if bucket != "" && !nameRe.MatchString(bucket) {
-		fail(w, http.StatusBadRequest, "bucket: the bucket to pull, or none for every bucket")
+	collection := q.Get("collection")
+	if collection != "" && !nameRe.MatchString(collection) {
+		fail(w, http.StatusBadRequest, "collection: the collection to pull, or none for every collection")
 		return
 	}
 	var after uint64
@@ -268,12 +269,12 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request, account string) {
 		}
 		limit = n
 	}
-	id, err := s.storeID(account)
+	id, err := s.storeID(bucket)
 	if err != nil {
 		internal(w, r, err)
 		return
 	}
-	items, err := s.store.Since(account, bucket, after, limit+1)
+	items, err := s.store.Since(bucket, collection, after, limit+1)
 	if err != nil {
 		internal(w, r, err)
 		return
@@ -292,5 +293,5 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request, account string) {
 	reply(w, http.StatusOK, map[string]any{"store": id, "items": items, "next": next, "more": more})
 }
 
-// NewStoreID makes a store id, for a Store to use when an account has none.
+// NewStoreID makes a store id, for a Store to use when a bucket has none.
 func NewStoreID() string { return "s_" + synckosh.NewGUID() }

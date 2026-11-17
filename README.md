@@ -5,7 +5,7 @@ anything. A small server keeps the newest version of each item, and never sees i
 private part of every item is sealed with a key that only the user's passphrases open, as
 [keykosh](https://github.com/sudiptadeb/keykosh) seals its keys.
 
-- **One shape:** an item has a bucket, a type, a guid, a timestamp, a deleted flag, a public part
+- **One shape:** an item has a collection, a datatype, a guid, a timestamp, a deleted flag, a public part
   and a private part.
 - **One rule:** for each guid, the latest timestamp wins; in the same millisecond, the later push.
 - **Items, not relationships:** an item names its parent. Lists, objects and trees are built on
@@ -13,14 +13,16 @@ private part of every item is sealed with a key that only the user's passphrases
 - **The devices hold the real copy:** if the server loses data, it changes its store id and the
   devices push everything back.
 
-The protocol is [SPEC.md](SPEC.md).
+Items live in a **bucket** (one synced space: a person's data, a shared list), grouped in
+**collections** (bookmarks, logins), and each has a **datatype** (folder, bookmark). The protocol
+is [SPEC.md](SPEC.md).
 
 ## Packages
 
 | Package | What it is |
 |---|---|
 | `synckosh` | the item, timestamps, UUIDv7 guids, order keys, the data key and passphrase-sealed copies |
-| `client` | a device's `Replica`: put, delete, clear, read and sync every bucket, over a `Local` store |
+| `client` | a device's `Replica`: put, delete, clear, read and sync every collection, over a `Local` store |
 | `server` | the server as an `http.Handler`, over a `Store`; signing in is the host's |
 | `bolt` | a `server.Store` and a `client.Local` in bbolt files |
 
@@ -37,7 +39,7 @@ r, _ := client.Open(client.Config{
 
 sealed, _ := key.SealedCopy(passphrase, "Main passphrase")
 r.Put(sealed)
-r.Put(synckosh.Item{Bucket: "bookmarks", Type: "bookmark",
+r.Put(synckosh.Item{Collection: "bookmarks", Datatype: "bookmark",
 	Public:  json.RawMessage(`{"parent":"root","order":"V"}`),
 	Private: json.RawMessage(`{"title":"Go","url":"https://go.dev/"}`)})
 r.Sync(ctx)
@@ -48,12 +50,12 @@ r.Sync(ctx)
 ```go
 store, _ := bolt.OpenStore("server.db")
 srv, _ := server.New(store, func(r *http.Request) (string, error) {
-	return accountFromYourSignIn(r)
+	return bucketFromYourSignIn(r) // the bucket this request may use
 })
 http.ListenAndServe(":8484", srv)
 ```
 
-`srv.ResetStore(account)` after any possible data loss, and `srv.Cleanup(90 * 24 * time.Hour)` now
+`srv.ResetStore(bucket)` after any possible data loss, and `srv.Cleanup(90 * 24 * time.Hour)` now
 and then.
 
 ## Tests
@@ -65,8 +67,8 @@ go test ./...
 They sync devices through a real server and bbolt files: newest wins whichever device pushes
 first, and the later push in the same millisecond; a login whose fields and passwords are items keeps both devices' edits; the server's file
 never holds a private part in the clear; a new store id refills the server, with a new device
-getting the data as it comes back; 2,500 items page without loss; clearing a bucket; reopening a
-device; retries, old versions, timestamps too far ahead and other accounts; cleanup; a device not pulling its own push back, unless another push came in between; a clock
+getting the data as it comes back; 2,500 items page without loss; clearing a collection; reopening a
+device; retries, old versions, timestamps too far ahead and other buckets; cleanup; a device not pulling its own push back, unless another push came in between; a clock
 two days ahead refused with a clear error, then healing; and joining with only a passphrase.
 
 ## Not yet

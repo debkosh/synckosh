@@ -1,4 +1,4 @@
-// Package client is the synckosh client: a Replica keeps one device's copy of an account's
+// Package client is the synckosh client: a Replica keeps one device's copy of a bucket's
 // items in a Local store, and syncs it with a server. Signing in is the host's business: it
 // gives the Replica an http.Client that adds whatever the server expects.
 package client
@@ -59,12 +59,12 @@ func (c *Client) Push(ctx context.Context, items []synckosh.Item) (Pushed, error
 	return p, nil
 }
 
-// Pull returns the items the server stored after the sequence number after: of one bucket, or
-// of every bucket if bucket is empty.
-func (c *Client) Pull(ctx context.Context, bucket string, after uint64) (Page, error) {
+// Pull returns the items the server stored after the sequence number after: of one collection, or
+// of every collection if collection is empty.
+func (c *Client) Pull(ctx context.Context, collection string, after uint64) (Page, error) {
 	q := url.Values{"after": {strconv.FormatUint(after, 10)}}
-	if bucket != "" {
-		q.Set("bucket", bucket)
+	if collection != "" {
+		q.Set("collection", collection)
 	}
 	var p Page
 	err := c.do(ctx, http.MethodGet, "v1/pull?"+q.Encode(), nil, &p)

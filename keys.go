@@ -11,11 +11,11 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// The keys bucket holds one sealed copy of the data key per passphrase. Its items are sealed
+// The keys collection holds one sealed copy of the data key per passphrase. Its items are sealed
 // by their passphrase, not by the data key.
 const (
-	KeysBucket    = "keys"
-	SealedKeyType = "sealed-key"
+	KeysCollection    = "keys"
+	SealedKeyDatatype = "sealed-key"
 )
 
 var (
@@ -23,13 +23,13 @@ var (
 	ErrUnknownKey = errors.New("sealed with a key this device doesn't have")
 )
 
-// DataKey seals the private part of every item in an account.
+// DataKey seals the private part of every item in a bucket.
 type DataKey struct {
 	ID  string
 	key [chacha20poly1305.KeySize]byte
 }
 
-// NewDataKey makes the key for a new account.
+// NewDataKey makes the key for a new bucket.
 func NewDataKey() (*DataKey, error) {
 	k := &DataKey{}
 	id := make([]byte, 8)
@@ -91,7 +91,7 @@ func open(key []byte, sealed string, ad []byte) ([]byte, error) {
 // Seal returns the item with its private part sealed, bound to the rest of the item, so the
 // server can't change the public part or move the private part to another item unnoticed.
 func (k *DataKey) Seal(it Item) (Item, error) {
-	if len(it.Private) == 0 || it.Bucket == KeysBucket {
+	if len(it.Private) == 0 || it.Collection == KeysCollection {
 		return it, nil
 	}
 	s, err := seal(k.key[:], it.Private, bound(it))
@@ -104,19 +104,19 @@ func (k *DataKey) Seal(it Item) (Item, error) {
 
 // Open returns the item with its private part opened.
 func (k *DataKey) Open(it Item) (Item, error) {
-	if len(it.Private) == 0 || it.Bucket == KeysBucket {
+	if len(it.Private) == 0 || it.Collection == KeysCollection {
 		return it, nil
 	}
 	var b box
 	if err := json.Unmarshal(it.Private, &b); err != nil || b.Box == "" {
-		return Item{}, fmt.Errorf("%s %s: private part is not sealed", it.Bucket, it.GUID)
+		return Item{}, fmt.Errorf("%s %s: private part is not sealed", it.Collection, it.GUID)
 	}
 	if b.Key != k.ID {
-		return Item{}, fmt.Errorf("%s %s: %w (%s)", it.Bucket, it.GUID, ErrUnknownKey, b.Key)
+		return Item{}, fmt.Errorf("%s %s: %w (%s)", it.Collection, it.GUID, ErrUnknownKey, b.Key)
 	}
 	plain, err := open(k.key[:], b.Box, bound(it))
 	if err != nil {
-		return Item{}, fmt.Errorf("%s %s: seal doesn't open: %w", it.Bucket, it.GUID, err)
+		return Item{}, fmt.Errorf("%s %s: seal doesn't open: %w", it.Collection, it.GUID, err)
 	}
 	it.Private = plain
 	return it, nil
@@ -141,7 +141,7 @@ const (
 	argonPar   = 4
 )
 
-// SealedCopy seals the data key with a passphrase, as an item for the keys bucket. An account
+// SealedCopy seals the data key with a passphrase, as an item for the keys collection. A bucket
 // can have several, one per passphrase. The caller gives it a guid and stores it as any item.
 func (k *DataKey) SealedCopy(passphrase, label string) (Item, error) {
 	salt := make([]byte, 16)
@@ -157,7 +157,7 @@ func (k *DataKey) SealedCopy(passphrase, label string) (Item, error) {
 	}
 	pub, _ := json.Marshal(p)
 	priv, _ := json.Marshal(box{Box: s})
-	return Item{Bucket: KeysBucket, Type: SealedKeyType, Public: pub, Private: priv}, nil
+	return Item{Collection: KeysCollection, Datatype: SealedKeyDatatype, Public: pub, Private: priv}, nil
 }
 
 // OpenSealedCopy opens a sealed copy with its passphrase.

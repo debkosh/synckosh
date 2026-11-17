@@ -19,19 +19,19 @@ import (
 	"github.com/sudiptadeb/synckosh/server"
 )
 
-// The tests sign in with a header naming the account: signing in is the host's business.
+// The tests sign in with a header naming the bucket: signing in is the host's business.
 func auth(r *http.Request) (string, error) {
-	if a := r.Header.Get("X-Account"); a != "" {
+	if a := r.Header.Get("X-Bucket"); a != "" {
 		return a, nil
 	}
-	return "", errors.New("no account")
+	return "", errors.New("no bucket")
 }
 
-type signedIn struct{ account string }
+type signedIn struct{ bucket string }
 
 func (s signedIn) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
-	r.Header.Set("X-Account", s.account)
+	r.Header.Set("X-Bucket", s.bucket)
 	return http.DefaultTransport.RoundTrip(r)
 }
 
@@ -114,9 +114,9 @@ func private(t *testing.T, it synckosh.Item) map[string]any {
 	return m
 }
 
-func items(t *testing.T, d *device, bucket string) []synckosh.Item {
+func items(t *testing.T, d *device, collection string) []synckosh.Item {
 	t.Helper()
-	its, err := d.Items(bucket)
+	its, err := d.Items(collection)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func items(t *testing.T, d *device, bucket string) []synckosh.Item {
 }
 
 func bookmark(parent, title string) synckosh.Item {
-	return synckosh.Item{Bucket: "bookmarks", Type: "bookmark",
+	return synckosh.Item{Collection: "bookmarks", Datatype: "bookmark",
 		Public:  json.RawMessage(fmt.Sprintf(`{"parent":%q,"order":"V"}`, parent)),
 		Private: json.RawMessage(fmt.Sprintf(`{"title":%q,"url":"https://example.com/"}`, title))}
 }
@@ -164,7 +164,7 @@ func TestNewestWins(t *testing.T) {
 		t.Run(first+" pushes first", func(t *testing.T) {
 			e := newEnv(t)
 			mac, phone := e.device("mac"), e.device("phone")
-			s := put(t, mac, synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme",
+			s := put(t, mac, synckosh.Item{Collection: "settings", Datatype: "setting", GUID: "setting:theme",
 				Public: json.RawMessage(`{"key":"theme"}`), Private: json.RawMessage(`{"value":"dark"}`)})
 			sync(t, mac, phone)
 			s.Private = json.RawMessage(`{"value":"light"}`)
@@ -194,7 +194,7 @@ func TestNewestWins(t *testing.T) {
 func TestSameMillisecondLaterPushWins(t *testing.T) {
 	e := newEnv(t)
 	mac, phone := e.device("mac"), e.device("phone")
-	s := put(t, mac, synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme",
+	s := put(t, mac, synckosh.Item{Collection: "settings", Datatype: "setting", GUID: "setting:theme",
 		Public: json.RawMessage(`{"key":"theme"}`), Private: json.RawMessage(`{"value":"dark"}`)})
 	sync(t, mac, phone)
 
@@ -224,9 +224,9 @@ func TestSameMillisecondLaterPushWins(t *testing.T) {
 func TestLoginAsItems(t *testing.T) {
 	e := newEnv(t)
 	mac, phone := e.device("mac"), e.device("phone")
-	login := put(t, mac, synckosh.Item{Bucket: "logins", Type: "login", Private: json.RawMessage(`{"origin":"https://x.com"}`)})
+	login := put(t, mac, synckosh.Item{Collection: "logins", Datatype: "login", Private: json.RawMessage(`{"origin":"https://x.com"}`)})
 	field := func(key, value string) synckosh.Item {
-		return synckosh.Item{Bucket: "logins", Type: "login-field",
+		return synckosh.Item{Collection: "logins", Datatype: "login-field",
 			Public: json.RawMessage(fmt.Sprintf(`{"parent":%q,"key":%q}`, login.GUID, key)), Private: json.RawMessage(fmt.Sprintf(`{"value":%q}`, value))}
 	}
 	user := put(t, mac, field("username", "me"))
@@ -242,7 +242,7 @@ func TestLoginAsItems(t *testing.T) {
 	for _, d := range []*device{mac, phone} {
 		vals := map[string][]string{}
 		for _, it := range items(t, d, "logins") {
-			if it.Type == "login-field" {
+			if it.Datatype == "login-field" {
 				var p struct{ Key string }
 				json.Unmarshal(it.Public, &p)
 				vals[p.Key] = append(vals[p.Key], private(t, it)["value"].(string))
@@ -257,7 +257,7 @@ func TestLoginAsItems(t *testing.T) {
 func TestServerSeesOnlyThePublicPart(t *testing.T) {
 	e := newEnv(t)
 	mac := e.device("mac")
-	put(t, mac, synckosh.Item{Bucket: "logins", Type: "login-field",
+	put(t, mac, synckosh.Item{Collection: "logins", Datatype: "login-field",
 		Public: json.RawMessage(`{"parent":"l1","key":"password"}`), Private: json.RawMessage(`{"value":"hunter2"}`)})
 	sync(t, mac)
 	e.store.Close()
@@ -329,7 +329,7 @@ func TestBigPushPagesWithoutLoss(t *testing.T) {
 	mac, phone := e.device("mac"), e.device("phone")
 	var visits []synckosh.Item
 	for i := 0; i < 2500; i++ {
-		visits = append(visits, synckosh.Item{Bucket: "history", Type: "visit", Private: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))})
+		visits = append(visits, synckosh.Item{Collection: "history", Datatype: "visit", Private: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))})
 	}
 	if _, err := mac.Put(visits...); err != nil {
 		t.Fatal(err)
@@ -341,7 +341,7 @@ func TestBigPushPagesWithoutLoss(t *testing.T) {
 	if err := mac.Clear("history"); err != nil {
 		t.Fatal(err)
 	}
-	put(t, mac, synckosh.Item{Bucket: "history", Type: "visit", Private: json.RawMessage(`{"n":"after"}`)})
+	put(t, mac, synckosh.Item{Collection: "history", Datatype: "visit", Private: json.RawMessage(`{"n":"after"}`)})
 	sync(t, mac, phone)
 	if got := items(t, phone, "history"); len(got) != 1 {
 		t.Fatalf("after clearing, the phone shows %d visits, want the one made after", len(got))
@@ -370,12 +370,12 @@ func TestServerChecks(t *testing.T) {
 	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
 	ctx := context.Background()
 	now := time.Now().UnixMilli()
-	// Another account's pushes don't use up this account's sequence numbers.
+	// Another bucket's pushes don't use up this bucket's sequence numbers.
 	other := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"someone-else"}}}
 	for i := 0; i < 3; i++ {
-		other.Push(ctx, []synckosh.Item{{Bucket: "settings", Type: "setting", GUID: fmt.Sprint("o", i), Timestamp: now}})
+		other.Push(ctx, []synckosh.Item{{Collection: "settings", Datatype: "setting", GUID: fmt.Sprint("o", i), Timestamp: now}})
 	}
-	it := synckosh.Item{Bucket: "settings", Type: "setting", GUID: "setting:theme", Timestamp: now,
+	it := synckosh.Item{Collection: "settings", Datatype: "setting", GUID: "setting:theme", Timestamp: now,
 		Extra: map[string]json.RawMessage{"later": json.RawMessage(`{"x":1}`)}}
 	for i := 0; i < 2; i++ {
 		res, err := c.Push(ctx, []synckosh.Item{it})
@@ -407,7 +407,7 @@ func TestServerChecks(t *testing.T) {
 		t.Fatal("pulled without signing in")
 	}
 	if p, _ := other.Pull(ctx, "", 0); len(p.Items) != 3 {
-		t.Fatalf("another account sees my items: %d", len(p.Items))
+		t.Fatalf("another bucket sees my items: %d", len(p.Items))
 	}
 }
 
@@ -444,9 +444,9 @@ func TestJoinWithPassphrase(t *testing.T) {
 	put(t, mac, bookmark("root", "Go"))
 	sync(t, mac)
 
-	// A new device has only the passphrase: it reads the keys bucket, then everything.
+	// A new device has only the passphrase: it reads the keys collection, then everything.
 	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
-	p, err := c.Pull(context.Background(), synckosh.KeysBucket, 0)
+	p, err := c.Pull(context.Background(), synckosh.KeysCollection, 0)
 	if err != nil || len(p.Items) != 1 {
 		t.Fatalf("%v %+v", err, p)
 	}
@@ -498,7 +498,7 @@ func TestOwnPushDoesNotComeBack(t *testing.T) {
 	mac := e.device("mac")
 	var visits []synckosh.Item
 	for i := 0; i < 1500; i++ {
-		visits = append(visits, synckosh.Item{Bucket: "history", Type: "visit", Private: json.RawMessage(`{}`)})
+		visits = append(visits, synckosh.Item{Collection: "history", Datatype: "visit", Private: json.RawMessage(`{}`)})
 	}
 	mac.Put(visits...)
 	put(t, mac, bookmark("root", "Go"))
@@ -543,7 +543,7 @@ func TestOwnPushDoesNotComeBack(t *testing.T) {
 func TestClockAheadIsRefusedThenHeals(t *testing.T) {
 	e := newEnv(t)
 	mac := e.device("mac")
-	ahead := synckosh.Item{Bucket: "bookmarks", Type: "bookmark", GUID: synckosh.NewGUID(),
+	ahead := synckosh.Item{Collection: "bookmarks", Datatype: "bookmark", GUID: synckosh.NewGUID(),
 		Timestamp: time.Now().Add(48 * time.Hour).UnixMilli(), Private: json.RawMessage(`{"title":"Ahead"}`)}
 	if err := mac.local.Put(client.Entry{Item: ahead, Pending: true}); err != nil {
 		t.Fatal(err)

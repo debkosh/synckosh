@@ -20,21 +20,21 @@ type Entry struct {
 // Local is a device's own store. It is the real copy of the data: if the server loses
 // anything, devices push it back from here. Package bolt has one.
 type Local interface {
-	Get(bucket, guid string) (Entry, bool, error)
+	Get(collection, guid string) (Entry, bool, error)
 	Put(entries ...Entry) error
-	// Each calls fn for every entry of a bucket, or of every bucket if bucket is empty.
-	Each(bucket string, fn func(Entry) error) error
-	// Pending returns the entries of every bucket that the server doesn't have yet.
+	// Each calls fn for every entry of a collection, or of every collection if collection is empty.
+	Each(collection string, fn func(Entry) error) error
+	// Pending returns the entries of every collection that the server doesn't have yet.
 	Pending() ([]Entry, error)
 	Meta(key string) ([]byte, error) // nil if unset
 	SetMeta(key string, value []byte) error
 }
 
-// ClearType is the type of an item that clears a bucket: every item in the bucket older than
+// ClearDatatype is the datatype of an item that clears a collection: every item in the collection older than
 // it is gone. Clearing history is one such item, not one delete per visit.
-const ClearType = "sync.clear"
+const ClearDatatype = "sync.clear"
 
-// Config is what a Replica needs. It syncs every bucket: one the app or another device starts
+// Config is what a Replica needs. It syncs every collection: one the app or another device starts
 // using needs no setup.
 type Config struct {
 	Client *Client
@@ -42,7 +42,7 @@ type Config struct {
 	Key    *synckosh.DataKey
 }
 
-// Replica is one device's copy of an account. Its methods may be called from any goroutine,
+// Replica is one device's copy of a bucket. Its methods may be called from any goroutine,
 // one at a time.
 type Replica struct {
 	mu    sync.Mutex
@@ -83,7 +83,7 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 		if it.GUID == "" {
 			it.GUID = synckosh.NewGUID()
 		}
-		old, has, err := r.local.Get(it.Bucket, it.GUID)
+		old, has, err := r.local.Get(it.Collection, it.GUID)
 		if err != nil {
 			return nil, err
 		}
@@ -98,10 +98,10 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 
 // Delete marks an item deleted. It keeps its data, so it can be restored by putting it again,
 // until the server's cleanup removes it.
-func (r *Replica) Delete(bucket, guid string) error {
+func (r *Replica) Delete(collection, guid string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e, has, err := r.local.Get(bucket, guid)
+	e, has, err := r.local.Get(collection, guid)
 	if err != nil || !has || e.Item.Deleted {
 		return err
 	}
@@ -110,11 +110,11 @@ func (r *Replica) Delete(bucket, guid string) error {
 	return r.write(it)
 }
 
-// Clear removes everything in a bucket made before now, on every device.
-func (r *Replica) Clear(bucket string) error {
+// Clear removes everything in a collection made before now, on every device.
+func (r *Replica) Clear(collection string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.write(synckosh.Item{Bucket: bucket, Type: ClearType, GUID: synckosh.NewGUID()})
+	return r.write(synckosh.Item{Collection: collection, Datatype: ClearDatatype, GUID: synckosh.NewGUID()})
 }
 
 // write stores edits made here, all with one timestamp, so a write of many items doesn't move
@@ -133,21 +133,21 @@ func (r *Replica) write(its ...synckosh.Item) error {
 }
 
 // Get returns an item, deleted or not.
-func (r *Replica) Get(bucket, guid string) (synckosh.Item, bool, error) {
+func (r *Replica) Get(collection, guid string) (synckosh.Item, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e, has, err := r.local.Get(bucket, guid)
+	e, has, err := r.local.Get(collection, guid)
 	return e.Item, has, err
 }
 
-// Items returns a bucket's live items, in guid order, which is the order they were made.
-func (r *Replica) Items(bucket string) ([]synckosh.Item, error) {
+// Items returns a collection's live items, in guid order, which is the order they were made.
+func (r *Replica) Items(collection string) ([]synckosh.Item, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var all []synckosh.Item
 	var cleared int64
-	err := r.local.Each(bucket, func(e Entry) error {
-		if e.Item.Type == ClearType {
+	err := r.local.Each(collection, func(e Entry) error {
+		if e.Item.Datatype == ClearDatatype {
 			cleared = max(cleared, e.Item.Timestamp)
 			return nil
 		}
@@ -173,9 +173,9 @@ const maxRounds = 5
 // Refused is a pushed item the server refused. It stays pending, and goes out again on the
 // next Sync.
 type Refused struct {
-	Bucket, GUID string
-	Code         string // one of synckosh.Refused...
-	Error        string
+	Collection, GUID string
+	Code             string // one of synckosh.Refused...
+	Error            string
 }
 
 // RefusedError is what Sync returns when the server refused some items. Everything else was
@@ -195,7 +195,7 @@ func (e *RefusedError) Error() string {
 		}
 	}
 	return fmt.Sprintf("sync: the server refused %d items: %s %s: %s", len(e.Items),
-		e.Items[0].Bucket, e.Items[0].GUID, e.Items[0].Error)
+		e.Items[0].Collection, e.Items[0].GUID, e.Items[0].Error)
 }
 
 // Sync pulls what is new, then pushes what changed here. If the server's store id has changed
@@ -322,7 +322,7 @@ func (r *Replica) take(remote synckosh.Item) (Entry, bool, error) {
 		return Entry{}, false, err
 	}
 	r.clock.Observe(remote.Timestamp)
-	e, has, err := r.local.Get(remote.Bucket, remote.GUID)
+	e, has, err := r.local.Get(remote.Collection, remote.GUID)
 	if err != nil {
 		return Entry{}, false, err
 	}
@@ -393,7 +393,7 @@ func (r *Replica) push(ctx context.Context) (restart bool, refused *RefusedError
 					refused = &RefusedError{}
 				}
 				it := batch[i].Item
-				refused.Items = append(refused.Items, Refused{it.Bucket, it.GUID, rs.Code, rs.Error})
+				refused.Items = append(refused.Items, Refused{it.Collection, it.GUID, rs.Code, rs.Error})
 				if rs.Code == synckosh.RefusedTimestampAhead {
 					// Never stored anywhere, so it can take a new timestamp. While this device's
 					// clock is wrong the new one is refused too; once it is right, it goes out.
