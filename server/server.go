@@ -95,10 +95,13 @@ func (s *Server) Cleanup(age time.Duration) (int, error) {
 	return s.store.Cleanup(s.now().Add(-age).UnixMilli())
 }
 
+// reply writes JSON without Go's escaping of <, > and &, so a part goes out as it came in.
 func reply(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(v)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	enc.Encode(v)
 }
 
 func fail(w http.ResponseWriter, code int, msg string) {

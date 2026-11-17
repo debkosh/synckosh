@@ -200,7 +200,7 @@ func (t *storeTx) Put(items []synckosh.Item) error {
 				return err
 			}
 		}
-		v, err := json.Marshal(it)
+		v, err := synckosh.Marshal(it)
 		if err != nil {
 			return err
 		}
@@ -351,7 +351,7 @@ func (l *Local) Put(entries ...client.Entry) error {
 			if err != nil {
 				return err
 			}
-			v, err := json.Marshal(e)
+			v, err := synckosh.Marshal(e)
 			if err != nil {
 				return err
 			}

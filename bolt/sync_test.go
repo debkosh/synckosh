@@ -69,15 +69,20 @@ type device struct {
 
 func (e *env) device(name string) *device {
 	e.t.Helper()
+	return e.deviceWith(name, client.Config{})
+}
+
+// deviceWith opens a device with cfg, its client, store and key filled in.
+func (e *env) deviceWith(name string, cfg client.Config) *device {
+	e.t.Helper()
 	local, err := OpenLocal(filepath.Join(e.dir, name+".db"))
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	e.t.Cleanup(func() { local.Close() })
-	r, err := client.Open(client.Config{
-		Client: &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}},
-		Local:  local, Key: e.key,
-	})
+	cfg.Client = &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
+	cfg.Local, cfg.Key = local, e.key
+	r, err := client.Open(cfg)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -230,7 +235,7 @@ func TestSameMillisecondLaterPushWins(t *testing.T) {
 	other := s
 	other.Sequence = 0
 	other.Private = json.RawMessage(`{"value":"light"}`)
-	sealed, err := e.key.Seal(other)
+	sealed, err := e.key.Seal(other, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,36 +466,52 @@ func TestCleanup(t *testing.T) {
 	}
 }
 
-func TestJoinWithPassphrase(t *testing.T) {
+func TestCreateThenJoinWithPassphrase(t *testing.T) {
 	e := newEnv(t)
-	mac := e.device("mac")
-	sealed, err := e.key.SealedCopy("correct horse battery staple", "Main")
+	ctx := context.Background()
+	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
+	key, err := client.Create(ctx, c, "correct horse battery staple", "Main")
 	if err != nil {
 		t.Fatal(err)
 	}
-	put(t, mac, sealed)
+	if _, err := client.Create(ctx, c, "another", "Second first run"); !errors.Is(err, client.ErrHasKey) {
+		t.Fatalf("a second Create: %v", err)
+	}
+	e.key = key
+	mac := e.device("mac")
 	put(t, mac, bookmark("root", "Go"))
 	sync(t, mac)
+	if got, _ := mac.Items(synckosh.KeysCollection); len(got) != 1 {
+		t.Fatalf("the Mac holds %d sealed copies, want the one Create made", len(got))
+	}
 
-	// A new device has only the passphrase: it reads the keys collection, then everything.
-	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
-	p, err := c.Pull(context.Background(), synckosh.KeysCollection, 0)
-	if err != nil || len(p.Items) != 1 {
-		t.Fatalf("%v %+v", err, p)
+	// A new device has only the passphrase.
+	if _, err := client.Join(ctx, c, "wrong"); !errors.Is(err, synckosh.ErrPassphrase) {
+		t.Fatalf("join with a wrong passphrase: %v", err)
 	}
-	key, err := synckosh.OpenSealedCopy(p.Items[0], "correct horse battery staple")
-	if err != nil {
+	joined, err := client.Join(ctx, c, "correct horse battery staple")
+	if err != nil || joined.ID != key.ID {
 		t.Fatal(err)
 	}
-	local, _ := OpenLocal(filepath.Join(e.dir, "new.db"))
-	defer local.Close()
-	r, _ := client.Open(client.Config{Client: c, Local: local, Key: key})
-	if err := r.Sync(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	got, _ := r.Items("bookmarks")
+	e.key = joined
+	phone := e.device("phone")
+	sync(t, phone)
+	got := items(t, phone, "bookmarks")
 	if len(got) != 1 || private(t, got[0])["title"] != "Go" {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// Create refuses a bucket with any item in it, not only one with a sealed copy: its passphrases
+// may all be gone while its devices still hold the key.
+func TestCreateRefusesABucketWithItems(t *testing.T) {
+	e := newEnv(t)
+	mac := e.device("mac")
+	put(t, mac, bookmark("root", "Go"))
+	sync(t, mac)
+	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
+	if _, err := client.Create(context.Background(), c, "pass", "Main"); !errors.Is(err, client.ErrHasKey) {
+		t.Fatalf("%v", err)
 	}
 }
 
@@ -547,7 +568,7 @@ func TestOwnPushDoesNotComeBack(t *testing.T) {
 			}
 			theirs = bookmark("root", "Theirs")
 			theirs.GUID, theirs.Timestamp = synckosh.NewGUID(), time.Now().UnixMilli()
-			sealed, _ := e.key.Seal(theirs)
+			sealed, _ := e.key.Seal(theirs, false)
 			raw.Push(context.Background(), []synckosh.Item{sealed})
 		}}}}})
 	d := &device{busy, "busy", local}

@@ -11,8 +11,9 @@ import (
 )
 
 // Item is one synced thing. Public is plain: the server and a device that hasn't unlocked can
-// read it. Private is plain on the device and sealed on the wire. Sequence and DeletedAt are set
-// by the server. Fields a later version adds are kept in Extra and written back unchanged.
+// read it. Private is plain on the device and sealed on the wire. Base is the sequence number of
+// the version an edit was made from, 0 for none. Sequence and DeletedAt are set by the server.
+// Fields a later version adds are kept in Extra and written back unchanged.
 type Item struct {
 	Collection string
 	Datatype   string
@@ -21,16 +22,17 @@ type Item struct {
 	Deleted    bool
 	Public     json.RawMessage
 	Private    json.RawMessage
+	Base       uint64 // the sequence number of the version this edit was made from
 	Sequence   uint64 // the server's sequence number for this version
 	DeletedAt  int64  // the server's clock, in milliseconds, when it stored the delete
 	Extra      map[string]json.RawMessage
 }
 
 var known = map[string]bool{"collection": true, "datatype": true, "guid": true, "timestamp": true, "deleted": true,
-	"public": true, "private": true, "sequence": true, "deleted_at": true}
+	"public": true, "private": true, "base": true, "sequence": true, "deleted_at": true}
 
 func (it Item) MarshalJSON() ([]byte, error) {
-	m := make(map[string]json.RawMessage, len(it.Extra)+9)
+	m := make(map[string]json.RawMessage, len(it.Extra)+10)
 	for k, v := range it.Extra {
 		m[k] = v
 	}
@@ -49,6 +51,9 @@ func (it Item) MarshalJSON() ([]byte, error) {
 	if len(it.Private) > 0 {
 		m["private"] = it.Private
 	}
+	if it.Base != 0 {
+		set("base", it.Base)
+	}
 	if it.Sequence != 0 {
 		set("sequence", it.Sequence)
 	}
@@ -65,7 +70,7 @@ func (it *Item) UnmarshalJSON(b []byte) error {
 	}
 	var v Item
 	fields := map[string]any{"collection": &v.Collection, "datatype": &v.Datatype, "guid": &v.GUID, "timestamp": &v.Timestamp,
-		"deleted": &v.Deleted, "sequence": &v.Sequence, "deleted_at": &v.DeletedAt}
+		"deleted": &v.Deleted, "base": &v.Base, "sequence": &v.Sequence, "deleted_at": &v.DeletedAt}
 	for k, dst := range fields {
 		if raw, ok := m[k]; ok {
 			if err := json.Unmarshal(raw, dst); err != nil {
@@ -116,20 +121,4 @@ func marshalSorted(m map[string]json.RawMessage) ([]byte, error) {
 	}
 	buf.WriteByte('}')
 	return buf.Bytes(), nil
-}
-
-// bound is what an item's seal binds its private part to: everything the device wrote but
-// the private part itself.
-func bound(it Item) []byte {
-	var pub bytes.Buffer
-	if len(it.Public) > 0 {
-		if json.Compact(&pub, it.Public) != nil {
-			pub.Reset()
-			pub.Write(it.Public)
-		}
-	} else {
-		pub.WriteString("null")
-	}
-	b, _ := json.Marshal([]any{it.Collection, it.Datatype, it.GUID, it.Timestamp, it.Deleted, json.RawMessage(pub.Bytes())})
-	return b
 }

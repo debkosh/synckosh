@@ -33,6 +33,7 @@ Three levels name where an item lives:
   "deleted": false,
   "public": {"parent": "019a8f3c-5e1f-7a10-8b2e-1c5d0f3a9e42", "order": "V"},
   "private": {"key": "k_sUwGzUYSPw", "box": "7lg3iKfl2s0W…"},
+  "base": 40,
   "sequence": 42,
   "deleted_at": 1763390000000
 }
@@ -46,7 +47,8 @@ Three levels name where an item lives:
 | `timestamp` | device | when the edit was made: the device's clock, in milliseconds. |
 | `deleted` | device | true for a deleted item. |
 | `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |
-| `private` | device | JSON sealed with the bucket's data key. |
+| `private` | device | JSON sealed with the bucket's data key, below. |
+| `base` | device | the `sequence` of the version this edit was made from; absent for a new item. |
 | `sequence` | server | the server's sequence number for this version: the order it was stored in, from the bucket's own counter, which only goes up. |
 | `deleted_at` | server | the server's clock, in milliseconds, when it first stored the item deleted. |
 
@@ -80,12 +82,40 @@ device made an edit.
 
 ### Public and private parts
 
-The private part is sealed with XChaCha20-Poly1305 under the bucket's data key:
-`{"key": "<data key id>", "box": "<base64 of 24-byte nonce and ciphertext>"}`. The additional
-data is the JSON array `[collection, datatype, guid, timestamp, deleted, public]`, so the server can't change
-the public part, or move a private part to another item, without the device noticing.
-
 The app decides, for each datatype, what goes in the public part and what in the private part.
+
+When a bucket has a data key, every item is sealed, an empty private part included, with
+XChaCha20-Poly1305 under the data key. The wire's `private` is then
+`{"key": "<data key id>", "box": "<base64>"}`, with `"public": true` added when the box holds a
+copy of the public part. Base64 is the standard alphabet without padding; the box is the
+24-byte nonce followed by the ciphertext.
+
+- **The box** opens to the private part's JSON, or `null` when it has none. Sealed with its
+  public part, it opens to the JSON array `[public, private]` instead, each `null` when absent.
+- **The additional data** is the ASCII text of seven lines joined by `\n`, with no newline at the
+  end: collection, datatype, guid, timestamp in decimal, deleted as `1` or `0`, base in decimal or
+  empty when absent, and `1` or `0` for whether the box holds the public part. Valid names hold no
+  newline, so the text can be read only one way.
+- **A device that opens an item** sealed with its public part uses the copy from the box and
+  ignores the one outside, which is there for the server and for devices that can't open the item.
+  Without the copy, the public part outside is not checked: the server could change it unnoticed,
+  but nothing else.
+- **The library's own items**, whose datatypes start with `_`, are always sealed with their public
+  part, and a device refuses one that isn't.
+
+A device that holds the key takes from the server only items it can open:
+- **Rejected:** an item that is invalid, not sealed, or whose seal doesn't open under the key: the
+  server or someone else changed or forged it. It is not stored, Sync reports it, and the cursor
+  moves on.
+- **Locked:** an item sealed under a key the device doesn't hold. It is unverified, so it has no
+  effect. It is kept only where the device holds nothing it can open, or an older locked version;
+  otherwise it is passed over. A version the device can open always replaces a locked one,
+  whatever the timestamps. A locked item is not a delete, is never merged, and is never pushed,
+  not even in a refill. The app can't edit it, and must not trust what it shows.
+
+Without a data key nothing is sealed, every part is plain, and the server is trusted. A device
+with no key pointed at a sealed bucket writes plain items, which the devices that hold the key
+reject.
 
 ### What the app decides
 
@@ -109,21 +139,57 @@ Clearing history is one such item, not one delete per visit.
 
 ## Keys
 
-- **One data key per bucket** seals every private part. Devices keep it in the OS keychain.
+- **One data key per bucket** seals every item. Devices keep it in the OS keychain.
 - **The data key is never shown.** It never leaves a device's key store: no export, no QR code,
   no copy on screen. Anything a person sees, writes down or scans, such as a backup code or a QR
   code to join a device, is a random passphrase with its own sealed copy, so it can be removed on
   its own.
-- **Each passphrase seals its own copy** of the data key, as an item in the `_sealedkeys` collection, datatype
-  `_sealedkey`. Its public part holds what a new device needs: the label, the data key's id, and
-  the Argon2id settings and salt. Its private part is the data key sealed with XChaCha20-Poly1305
-  under the passphrase's Argon2id key, with the data key's id as additional data.
-- **Joining a device:** it pulls the `_sealedkeys` collection, asks for a passphrase, opens a copy, and keeps
-  the data key.
-- **Adding, changing or removing a passphrase** is putting, editing or deleting its copy.
-- **Changing the data key** after a leak means sealing every item again under a new key, as
-  ordinary edits. Each private part names its key, so a device meeting a key it doesn't have
-  asks for the passphrase again.
+- **Each passphrase seals its own copy** of the data key, as an item in the `_sealedkeys`
+  collection, datatype `_sealedkey`. Its public part is what a device that hasn't unlocked can
+  read: `{"label", "key", "kdf", "t", "m", "p", "salt", "box"}`. `key` is the data key's id; `kdf`
+  is `argon2id`, with `t` passes, `m` KiB of memory and `p` lanes, over the base64 `salt`, making
+  32 bytes; `box` is the data key's 32 bytes sealed with XChaCha20-Poly1305 under those 32 bytes,
+  with the data key's id as additional data. The copy is then sealed with the data key like any
+  item, with its public part.
+- **Joining a device:** it pulls `_sealedkeys`, asks for a passphrase, and for a live copy checks
+  the settings first, since it can't verify them yet: `kdf` is `argon2id`, `1 <= t <= 10`,
+  `1 <= p <= 16`, `8p <= m <= 262144`, and the salt is 8 to 64 bytes. It opens `box` with the
+  passphrase, then checks the copy's own seal with the key it got, which proves a holder of that
+  key wrote the copy. Then it keeps the key.
+- **The first device** makes the key only when the bucket holds no item at all, and pushes the
+  key's first sealed copy. A bucket that holds items has a key on its devices even when no copy is
+  left. Two devices that both start a bucket at the very same moment make two keys; each then sees
+  the other's items as locked, and the fix is to join one device to the other.
+- **A backup or join code** is a random passphrase of 128 bits with its own sealed copy.
+- **Adding, changing or removing a passphrase** is putting, editing or deleting its copy. Removing
+  one doesn't change the data key.
+- **Changing the data key** after a leak is not part of version 1.
+
+## What sealing protects
+
+When a bucket has a data key, the server, and anyone who controls it or the connection, cannot read
+a private part. It cannot make a device that holds the key use anything a key holder did not
+write: it cannot forge, alter or move an item, or mark one deleted. Public parts are checked only
+for items sealed with their public part; for the others, the server can change the public part.
+
+An item sealed under a key the device doesn't hold is kept as locked. A locked item is
+unverified: it changes nothing the device holds and is never sent on, and an app must not trust
+what it shows.
+
+The server can still see collection and datatype names, guids, timestamps, public parts, sizes and
+timing. It can withhold items or stop answering. It can hand a device an older version that a key
+holder really wrote: a new device may get old data or miss deletes, and a merger may merge an old
+version back in. It can try passphrases offline against the sealed copies, so a passphrase a
+person chose protects the data only as well as it was chosen; backup and join codes are random,
+128 bits. Removing a passphrase does not change the data key. Every device that holds the key can
+write anything. Without a key, everything is plain and the server is trusted.
+
+The seal leaves out `sequence`, `deleted_at`, the answers' `store` and `next`, and fields a reader
+doesn't know. Lying about them is withholding or replay, which the server can do anyway. A field
+that matters goes into the additional data, which is a new protocol version.
+
+If a person uses one passphrase for two buckets, a server can hand a device joining one the sealed
+copy of the other. The device then sees its real bucket as locked.
 
 ## The server
 

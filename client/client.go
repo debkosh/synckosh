@@ -51,7 +51,7 @@ func (c *Client) Pull(ctx context.Context, collection string, after uint64) (syn
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	var rd io.Reader
 	if body != nil {
-		b, err := json.Marshal(body)
+		b, err := synckosh.Marshal(body)
 		if err != nil {
 			return err
 		}

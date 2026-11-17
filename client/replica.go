@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -12,9 +13,11 @@ import (
 )
 
 // Entry is an item as a device keeps it: opened, and marked pending until the server has it.
+// A locked entry is one sealed under a key this device doesn't hold, kept as it came.
 type Entry struct {
 	Item    synckosh.Item `json:"item"`
 	Pending bool          `json:"pending,omitempty"`
+	Locked  bool          `json:"locked,omitempty"`
 }
 
 // Local is a device's own store. It is the real copy of the data: if the server loses
@@ -34,29 +37,40 @@ type Local interface {
 // it is gone. Clearing history is one such item, not one delete per visit.
 const ClearDatatype = "sync.clear"
 
+// ErrLocked is returned for an item sealed under a key this device doesn't hold: it can't be
+// read or changed here.
+var ErrLocked = errors.New("sealed with a key this device doesn't have")
+
 // Config is what a Replica needs. It syncs every collection: one the app or another device starts
 // using needs no setup.
 type Config struct {
 	Client *Client
 	Local  Local
-	Key    *synckosh.DataKey
-	Limits synckosh.Limits // this device's; zero fields take synckosh.DefaultLimits
+	// Key seals every item, and every item from the server must be sealed with it. Without a
+	// key everything is plain, and the server is trusted.
+	Key *synckosh.DataKey
+	// SealPublic lists the datatypes whose public part is sealed too, with a copy in the box, so
+	// the server can't change it. Otherwise only the private part and the item's fields are.
+	SealPublic map[string]bool
+	Limits     synckosh.Limits // this device's; zero fields take synckosh.DefaultLimits
 }
 
 // Replica is one device's copy of a bucket. Its methods may be called from any goroutine,
 // one at a time.
 type Replica struct {
-	mu     sync.Mutex
-	c      *Client
-	local  Local
-	key    *synckosh.DataKey
-	limits synckosh.Limits
-	clock  *synckosh.Clock
+	mu         sync.Mutex
+	c          *Client
+	local      Local
+	key        *synckosh.DataKey
+	sealPublic map[string]bool
+	limits     synckosh.Limits
+	clock      *synckosh.Clock
 }
 
 // Open opens a device's replica, with its clock where it left off.
 func Open(cfg Config) (*Replica, error) {
-	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, limits: cfg.Limits.OrDefaults(), clock: synckosh.NewClock()}
+	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, sealPublic: cfg.SealPublic,
+		limits: cfg.Limits.OrDefaults(), clock: synckosh.NewClock()}
 	b, err := r.local.Meta("clock")
 	if err != nil {
 		return nil, err
@@ -76,9 +90,26 @@ func (r *Replica) saveClock() error {
 	return r.local.SetMeta("clock", b)
 }
 
+// seal is an item as it goes to the server.
+func (r *Replica) seal(it synckosh.Item) (synckosh.Item, error) {
+	if r.key == nil {
+		return it, nil
+	}
+	return r.key.Seal(it, r.sealPublic[it.Datatype])
+}
+
+// open is an item from the server as this device keeps it. It fails with ErrUnknownKey for an
+// item sealed under another key, and otherwise for an item the server changed or forged.
+func (r *Replica) open(it synckosh.Item) (synckosh.Item, error) {
+	if r.key == nil {
+		return it, nil
+	}
+	return r.key.Open(it)
+}
+
 // Put records edits made here, in one write. A new item gets a new guid; an existing one keeps
-// its guid. Timestamps are set here. It returns the items as stored. If any item is invalid, or
-// too big to push once sealed, it returns an error and stores none of them.
+// its guid. Timestamps are set here. It returns the items as stored. If any item is invalid,
+// too big to push once sealed, or locked, it returns an error and stores none of them.
 func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -91,10 +122,13 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 		if err != nil {
 			return nil, err
 		}
+		if old.Locked {
+			return nil, fmt.Errorf("%s %s: %w", it.Collection, it.GUID, ErrLocked)
+		}
 		if has {
 			it.Extra = old.Item.Extra
 		}
-		it.Deleted, it.Sequence, it.DeletedAt = false, 0, 0
+		it.Deleted, it.Base, it.Sequence, it.DeletedAt = false, 0, 0, 0
 		out[i] = it
 	}
 	if err := r.write(out...); err != nil {
@@ -112,8 +146,11 @@ func (r *Replica) Delete(collection, guid string) error {
 	if err != nil || !has || e.Item.Deleted {
 		return err
 	}
+	if e.Locked {
+		return fmt.Errorf("%s %s: %w", collection, guid, ErrLocked)
+	}
 	it := e.Item
-	it.Deleted, it.Sequence, it.DeletedAt = true, 0, 0
+	it.Deleted, it.Base, it.Sequence, it.DeletedAt = true, 0, 0, 0
 	return r.write(it)
 }
 
@@ -148,11 +185,11 @@ func (r *Replica) check(it synckosh.Item) error {
 	if err := synckosh.Valid(it); err != nil {
 		return fmt.Errorf("%s %s: %w", it.Collection, it.GUID, err)
 	}
-	sealed, err := r.key.Seal(it)
+	sealed, err := r.seal(it)
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(sealed)
+	b, err := synckosh.Marshal(sealed)
 	if err != nil {
 		return err
 	}
@@ -162,26 +199,32 @@ func (r *Replica) check(it synckosh.Item) error {
 	return nil
 }
 
-// Get returns an item, deleted or not.
+// Get returns an item, deleted or not, or ErrLocked for one this device can't open.
 func (r *Replica) Get(collection, guid string) (synckosh.Item, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, has, err := r.local.Get(collection, guid)
+	if err == nil && e.Locked {
+		err = fmt.Errorf("%s %s: %w", collection, guid, ErrLocked)
+	}
 	return e.Item, has, err
 }
 
 // Items returns a collection's live items, in guid order, which is the order they were made.
+// Locked items are left out.
 func (r *Replica) Items(collection string) ([]synckosh.Item, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var all []synckosh.Item
 	var cleared int64
 	err := r.local.Each(collection, func(e Entry) error {
-		if e.Item.Datatype == ClearDatatype {
+		switch {
+		case e.Locked:
+		case e.Item.Datatype == ClearDatatype:
 			cleared = max(cleared, e.Item.Timestamp)
-			return nil
+		default:
+			all = append(all, e.Item)
 		}
-		all = append(all, e.Item)
 		return nil
 	})
 	if err != nil {
@@ -194,6 +237,21 @@ func (r *Replica) Items(collection string) ([]synckosh.Item, error) {
 		}
 	}
 	return out, nil
+}
+
+// Locked returns a collection's items sealed under a key this device doesn't hold, as they
+// came. Nothing in them is verified, so an app must not trust what they show.
+func (r *Replica) Locked(collection string) ([]synckosh.Item, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []synckosh.Item
+	err := r.local.Each(collection, func(e Entry) error {
+		if e.Locked {
+			out = append(out, e.Item)
+		}
+		return nil
+	})
+	return out, err
 }
 
 // maxRounds bounds the pull and push rounds of one Sync. A round repeats only when the server
@@ -228,18 +286,62 @@ func (e *RefusedError) Error() string {
 		e.Items[0].Collection, e.Items[0].GUID, e.Items[0].Error)
 }
 
+// Rejected is an item from the server that this device didn't take: invalid, not sealed, or
+// changed after it was sealed. A key holder didn't write it as it came.
+type Rejected struct {
+	Collection, GUID string
+	Error            string
+}
+
+// RejectedError is what Sync returns when it rejected items from the server. Everything else
+// was synced, and the rejected items changed nothing here.
+type RejectedError struct {
+	Items []Rejected
+}
+
+func (e *RejectedError) Error() string {
+	return fmt.Sprintf("sync: rejected %d items from the server: %s %s: %s", len(e.Items),
+		e.Items[0].Collection, e.Items[0].GUID, e.Items[0].Error)
+}
+
+// report gathers what one round of a Sync couldn't sync.
+type report struct {
+	refused  RefusedError
+	rejected RejectedError
+}
+
+func (rp *report) reject(it synckosh.Item, err error) {
+	rp.rejected.Items = append(rp.rejected.Items, Rejected{it.Collection, it.GUID, err.Error()})
+}
+
+func (rp *report) err() error {
+	var errs []error
+	if len(rp.refused.Items) > 0 {
+		errs = append(errs, &rp.refused)
+	}
+	if len(rp.rejected.Items) > 0 {
+		errs = append(errs, &rp.rejected)
+	}
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	return errors.Join(errs...)
+}
+
 // Sync pulls what is new, then pushes what changed here. If the server's store id has changed
 // since this device last synced, the server may have lost data, so the device pushes all it has.
-// If the server refused some items, Sync syncs the rest and returns a *RefusedError.
+// If the server refused some items, Sync syncs the rest and returns a *RefusedError; if it
+// rejected items from the server, a *RejectedError; when both, the two joined.
 func (r *Replica) Sync(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for round := 0; round < maxRounds; round++ {
-		again, err := r.pull(ctx)
+		rp := &report{}
+		again, err := r.pull(ctx, rp)
 		if err != nil {
 			return err
 		}
-		restart, refused, err := r.push(ctx)
+		restart, err := r.push(ctx, rp)
 		if err != nil {
 			return err
 		}
@@ -247,17 +349,15 @@ func (r *Replica) Sync(ctx context.Context) error {
 			return err
 		}
 		if !again && !restart {
-			if refused != nil {
-				return refused
-			}
-			return nil
+			return rp.err()
 		}
 	}
 	return fmt.Errorf("sync: not settled after %d rounds", maxRounds)
 }
 
 // checkStore compares the server's store id with the one this device last synced with. On a
-// new one, it marks everything here pending and reads from the start.
+// new one, it marks everything here pending and reads from the start. Locked entries are not
+// pushed: the devices that can open them hold the real copy.
 func (r *Replica) checkStore(id string) (bool, error) {
 	old, err := r.local.Meta("store")
 	if err != nil {
@@ -274,8 +374,10 @@ func (r *Replica) checkStore(id string) (bool, error) {
 	}
 	var all []Entry
 	if err := r.local.Each("", func(e Entry) error {
-		e.Pending = true
-		all = append(all, e)
+		if !e.Locked {
+			e.Pending = true
+			all = append(all, e)
+		}
 		return nil
 	}); err != nil {
 		return false, err
@@ -302,7 +404,7 @@ func (r *Replica) setCursor(n uint64) error {
 	return r.local.SetMeta("after", b)
 }
 
-func (r *Replica) pull(ctx context.Context) (restart bool, err error) {
+func (r *Replica) pull(ctx context.Context, rp *report) (restart bool, err error) {
 	after, err := r.cursor()
 	if err != nil {
 		return false, err
@@ -322,7 +424,7 @@ func (r *Replica) pull(ctx context.Context) (restart bool, err error) {
 		}
 		var es []Entry
 		for _, it := range p.Items {
-			e, ok, err := r.take(it)
+			e, ok, err := r.take(it, rp)
 			if err != nil {
 				return false, err
 			}
@@ -346,35 +448,52 @@ func (r *Replica) pull(ctx context.Context) (restart bool, err error) {
 // take returns the entry to store for an item from the server, unless this device has a version
 // with a later timestamp. One made in the same millisecond is taken: the server's copy is the
 // one pushed last, and every device ends up with it.
-func (r *Replica) take(remote synckosh.Item) (Entry, bool, error) {
-	remote, err := r.key.Open(remote)
-	if err != nil {
-		return Entry{}, false, err
+//
+// An item sealed under a key this device doesn't hold is locked. It is unverified, so it has no
+// effect: it is kept only where this device holds nothing it can open, or an older locked
+// version, and any version this device can open replaces it. An item that is invalid, not
+// sealed, or changed after it was sealed is rejected.
+func (r *Replica) take(remote synckosh.Item, rp *report) (Entry, bool, error) {
+	if err := synckosh.Valid(remote); err != nil {
+		rp.reject(remote, err)
+		return Entry{}, false, nil
 	}
-	r.clock.Observe(remote.Timestamp)
+	opened, err := r.open(remote)
+	locked := errors.Is(err, synckosh.ErrUnknownKey)
+	if err != nil && !locked {
+		rp.reject(remote, err)
+		return Entry{}, false, nil
+	}
 	e, has, err := r.local.Get(remote.Collection, remote.GUID)
 	if err != nil {
 		return Entry{}, false, err
 	}
-	if has && e.Item.Timestamp > remote.Timestamp {
+	if locked {
+		if has && (!e.Locked || e.Item.Timestamp > remote.Timestamp) {
+			return Entry{}, false, nil
+		}
+		return Entry{Item: remote, Locked: true}, true, nil
+	}
+	r.clock.Observe(opened.Timestamp)
+	if has && !e.Locked && e.Item.Timestamp > opened.Timestamp {
 		return Entry{}, false, nil // this device's version is later, and is pushed
 	}
-	return Entry{Item: remote}, true, nil
+	return Entry{Item: opened}, true, nil
 }
 
-// push sends what changed here, as many items at a time as the limits allow. When a push's sequence numbers follow
-// straight on from the cursor, nothing else reached the server in between, so the cursor moves
-// past them and this device doesn't pull its own items back. Otherwise the next pull brings
-// what came in between, and these items with it.
-func (r *Replica) push(ctx context.Context) (restart bool, refused *RefusedError, err error) {
+// push sends what changed here, as many items at a time as the limits allow. When a push's
+// sequence numbers follow straight on from the cursor, nothing else reached the server in
+// between, so the cursor moves past them and this device doesn't pull its own items back.
+// Otherwise the next pull brings what came in between, and these items with it.
+func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error) {
 	pending, err := r.local.Pending()
 	if err != nil {
-		return false, nil, err
+		return false, err
 	}
 	sort.Slice(pending, func(i, j int) bool { return pending[i].Item.Timestamp < pending[j].Item.Timestamp })
 	cur, err := r.cursor()
 	if err != nil {
-		return false, nil, err
+		return false, err
 	}
 	for len(pending) > 0 {
 		n := min(len(pending), r.limits.PushItems)
@@ -382,20 +501,20 @@ func (r *Replica) push(ctx context.Context) (restart bool, refused *RefusedError
 		pending = pending[n:]
 		out := make([]synckosh.Item, n)
 		for i, e := range batch {
-			if out[i], err = r.key.Seal(e.Item); err != nil {
-				return false, nil, err
+			if out[i], err = r.seal(e.Item); err != nil {
+				return false, err
 			}
 		}
 		res, err := r.c.Push(ctx, out)
 		if err != nil {
-			return false, nil, err
+			return false, err
 		}
 		changed, err := r.checkStore(res.Store)
 		if err != nil {
-			return false, nil, err
+			return false, err
 		}
 		if changed {
-			return true, nil, nil
+			return true, nil
 		}
 		var es []Entry
 		var lo, hi uint64
@@ -411,23 +530,20 @@ func (r *Replica) push(ctx context.Context) (restart bool, refused *RefusedError
 				hi = max(hi, rs.Sequence)
 			case rs.Current != nil:
 				// The server holds a later version: it wins, here too.
-				e, ok, err := r.take(*rs.Current)
+				e, ok, err := r.take(*rs.Current, rp)
 				if err != nil {
-					return false, nil, err
+					return false, err
 				}
 				if ok {
 					es = append(es, e)
 				}
 			default:
-				if refused == nil {
-					refused = &RefusedError{}
-				}
 				it := batch[i].Item
-				refused.Items = append(refused.Items, Refused{it.Collection, it.GUID, rs.Code, rs.Error})
+				rp.refused.Items = append(rp.refused.Items, Refused{it.Collection, it.GUID, rs.Code, rs.Error})
 				if rs.Code == synckosh.RefusedTimestampAhead {
 					// Never stored anywhere, so it can take a new timestamp. While this device's
 					// clock is wrong the new one is refused too; once it is right, it goes out.
-					refused.Ahead = max(refused.Ahead, time.Duration(it.Timestamp-res.Time)*time.Millisecond)
+					rp.refused.Ahead = max(rp.refused.Ahead, time.Duration(it.Timestamp-res.Time)*time.Millisecond)
 					r.clock.Reset(res.Time)
 					e := batch[i]
 					e.Item.Timestamp = r.clock.Now()
@@ -436,14 +552,78 @@ func (r *Replica) push(ctx context.Context) (restart bool, refused *RefusedError
 			}
 		}
 		if err := r.local.Put(es...); err != nil {
-			return false, nil, err
+			return false, err
 		}
 		if lo == cur+1 {
 			cur = hi
 			if err := r.setCursor(cur); err != nil {
-				return false, nil, err
+				return false, err
 			}
 		}
 	}
-	return false, refused, nil
+	return false, nil
+}
+
+// Join returns a bucket's data key, opened with one of its passphrases, for the device to keep
+// in its own key store. It reads the bucket's sealed copies and takes the first that opens and
+// whose own seal checks out under the key it holds.
+func Join(ctx context.Context, c *Client, passphrase string) (*synckosh.DataKey, error) {
+	var after uint64
+	for {
+		p, err := c.Pull(ctx, synckosh.KeysCollection, after)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range p.Items {
+			if it.Deleted || synckosh.Valid(it) != nil {
+				continue
+			}
+			if key, err := synckosh.OpenSealedCopy(it, passphrase); err == nil {
+				return key, nil
+			}
+		}
+		if !p.More {
+			return nil, synckosh.ErrPassphrase
+		}
+		after = p.Next
+	}
+}
+
+// ErrHasKey is Create's answer for a bucket that already holds items: its devices hold a key,
+// even when no sealed copy is left, so this device joins instead.
+var ErrHasKey = errors.New("the bucket already holds items: join it with a passphrase")
+
+// Create makes the data key of a new bucket and pushes its first sealed copy, under passphrase,
+// returning the key for the device to keep in its own key store. It refuses with ErrHasKey if
+// the bucket holds any item at all, so two first runs don't make two keys; two at the very same
+// moment still can, and then each device sees the other's items as locked until one joins.
+func Create(ctx context.Context, c *Client, passphrase, label string) (*synckosh.DataKey, error) {
+	p, err := c.Pull(ctx, "", 0)
+	if err != nil {
+		return nil, err
+	}
+	if len(p.Items) > 0 {
+		return nil, ErrHasKey
+	}
+	key, err := synckosh.NewDataKey()
+	if err != nil {
+		return nil, err
+	}
+	copy, err := key.SealedCopy(passphrase, label)
+	if err != nil {
+		return nil, err
+	}
+	copy.GUID, copy.Timestamp = synckosh.NewGUID(), time.Now().UnixMilli()
+	sealed, err := key.Seal(copy, true)
+	if err != nil {
+		return nil, err
+	}
+	res, err := c.Push(ctx, []synckosh.Item{sealed})
+	if err != nil {
+		return nil, err
+	}
+	if rs := res.Results[0]; !rs.OK {
+		return nil, fmt.Errorf("create: the server didn't store the sealed copy: %s %s", rs.Code, rs.Error)
+	}
+	return key, nil
 }

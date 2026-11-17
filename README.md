@@ -29,16 +29,12 @@ is [SPEC.md](SPEC.md).
 ## A device
 
 ```go
-local, _ := bolt.OpenLocal("sync.db")
-key, _ := synckosh.NewDataKey()             // or synckosh.OpenSealedCopy(item, passphrase)
-r, _ := client.Open(client.Config{
-	Client: &client.Client{URL: "https://sync.example.com", HTTP: signedInHTTPClient},
-	Local:  local,
-	Key:    key,
-})
+c := &client.Client{URL: "https://sync.example.com", HTTP: signedInHTTPClient}
+// First run only: make the bucket's key, or join with a passphrase. Keep it in the keychain.
+key, _ := client.Create(ctx, c, passphrase, "Main passphrase") // or client.Join(ctx, c, passphrase)
 
-sealed, _ := key.SealedCopy(passphrase, "Main passphrase")
-r.Put(sealed)
+local, _ := bolt.OpenLocal("sync.db")
+r, _ := client.Open(client.Config{Client: c, Local: local, Key: key})
 r.Put(synckosh.Item{Collection: "bookmarks", Datatype: "bookmark",
 	Public:  json.RawMessage(`{"parent":"root","order":"V"}`),
 	Private: json.RawMessage(`{"title":"Go","url":"https://go.dev/"}`)})

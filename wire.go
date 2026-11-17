@@ -1,6 +1,8 @@
 package synckosh
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"regexp"
 )
@@ -107,4 +109,16 @@ func Valid(it Item) error {
 // ValidName checks a collection name, as a pull asks for one.
 func ValidName(collection string) bool {
 	return collection == KeysCollection || nameRe.MatchString(collection)
+}
+
+// Marshal writes JSON as the wire carries it: without Go's escaping of <, >, & and U+2028, so a
+// public or private part keeps the bytes it was written with. json.Marshal escapes them.
+func Marshal(v any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }

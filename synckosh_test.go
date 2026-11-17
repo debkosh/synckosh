@@ -54,9 +54,9 @@ func TestSealBindsTheItem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	it := Item{Collection: "logins", Datatype: "login-field", GUID: "g1", Timestamp: 1,
+	it := Item{Collection: "logins", Datatype: "login-field", GUID: "g1", Timestamp: 1, Base: 3,
 		Public: json.RawMessage(`{"parent":"l1","key":"password"}`), Private: json.RawMessage(`{"value":"hunter2"}`)}
-	s, err := k.Seal(it)
+	s, err := k.Seal(it, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,10 +68,15 @@ func TestSealBindsTheItem(t *testing.T) {
 		t.Fatalf("open: %v %s", err, o.Private)
 	}
 	for name, change := range map[string]func(*Item){
-		"guid":      func(i *Item) { i.GUID = "g2" },
-		"timestamp": func(i *Item) { i.Timestamp = 2 },
-		"public":    func(i *Item) { i.Public = json.RawMessage(`{"parent":"l2","key":"password"}`) },
-		"deleted":   func(i *Item) { i.Deleted = true },
+		"collection": func(i *Item) { i.Collection = "notes" },
+		"datatype":   func(i *Item) { i.Datatype = "login" },
+		"guid":       func(i *Item) { i.GUID = "g2" },
+		"timestamp":  func(i *Item) { i.Timestamp = 2 },
+		"deleted":    func(i *Item) { i.Deleted = true },
+		"base":       func(i *Item) { i.Base = 0 },
+		"public flag": func(i *Item) {
+			i.Private = json.RawMessage(strings.Replace(string(i.Private), `"}`, `","public":true}`, 1))
+		},
 	} {
 		c := s
 		change(&c)
@@ -79,19 +84,57 @@ func TestSealBindsTheItem(t *testing.T) {
 			t.Errorf("opened after the server changed its %s", name)
 		}
 	}
+	// Without the public copy the outer public part isn't checked.
+	c := s
+	c.Public = json.RawMessage(`{"parent":"l2"}`)
+	if o, err := k.Open(c); err != nil || string(o.Public) != `{"parent":"l2"}` {
+		t.Fatalf("public part outside the seal: %v %s", err, o.Public)
+	}
 	other, _ := NewDataKey()
 	if _, err := other.Open(s); !errors.Is(err, ErrUnknownKey) {
 		t.Fatalf("another key: %v", err)
+	}
+	for _, plain := range []Item{{Collection: "logins"}, {Collection: "logins", Private: json.RawMessage(`{"value":"x"}`)}} {
+		if _, err := k.Open(plain); !errors.Is(err, ErrNotSealed) {
+			t.Fatalf("an unsealed item: %v", err)
+		}
+	}
+}
+
+func TestSealWithThePublicPart(t *testing.T) {
+	k, _ := NewDataKey()
+	pub := "{\"t\":\"a<b&c\u2028\"}"
+	it := Item{Collection: "notes", Datatype: "note", GUID: "g", Timestamp: 1, Public: json.RawMessage(pub)}
+	s, err := k.Seal(it, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Public = json.RawMessage(`{"t":"changed"}`)
+	o, err := k.Open(s)
+	if err != nil || string(o.Public) != pub || o.Private != nil {
+		t.Fatalf("want the public part from the box: %v %s %s", err, o.Public, o.Private)
+	}
+	// The library's own items are always sealed with their public part, and refused without.
+	own := Item{Collection: KeysCollection, Datatype: SealedKeyDatatype, GUID: "g", Timestamp: 1, Public: json.RawMessage(`{}`)}
+	if s, _ := k.Seal(own, false); !strings.Contains(string(s.Private), `"public":true`) {
+		t.Fatalf("a library item sealed without its public part: %s", s.Private)
 	}
 }
 
 func TestSealedCopies(t *testing.T) {
 	k, _ := NewDataKey()
-	a, err := k.SealedCopy("correct horse battery staple", "Main")
-	if err != nil {
-		t.Fatal(err)
+	sealedCopy := func(pass, label string) Item {
+		c, err := k.SealedCopy(pass, label)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.GUID, c.Timestamp = NewGUID(), 1
+		if c, err = k.Seal(c, false); err != nil {
+			t.Fatal(err)
+		}
+		return c
 	}
-	b, _ := k.SealedCopy("a second passphrase", "Spare")
+	a, b := sealedCopy("correct horse battery staple", "Main"), sealedCopy("a second passphrase", "Spare")
 	if strings.Contains(string(a.Public), "correct") || a.Collection != KeysCollection {
 		t.Fatalf("%s", a.Public)
 	}
@@ -106,6 +149,63 @@ func TestSealedCopies(t *testing.T) {
 		if err != nil || got.ID != k.ID || string(got.Bytes()) != string(k.Bytes()) {
 			t.Fatalf("%v %v", err, got)
 		}
+	}
+
+	// A copy that opens with the passphrase but isn't sealed by the key inside: forged.
+	other, _ := NewDataKey()
+	forged, _ := other.SealedCopy("correct horse battery staple", "Main")
+	forged.GUID, forged.Timestamp = NewGUID(), 1
+	forged, _ = k.Seal(forged, false)
+	if _, err := OpenSealedCopy(forged, "correct horse battery staple"); err == nil {
+		t.Fatal("opened a copy not sealed by its own key")
+	}
+	removed := a
+	removed.Deleted = true
+	if _, err := OpenSealedCopy(removed, "correct horse battery staple"); err == nil {
+		t.Fatal("opened a removed copy")
+	}
+}
+
+// A joining device reads the Argon2 settings before it can verify them, so it refuses any no
+// honest writer makes rather than panic or allocate a gigabyte.
+func TestSealedCopyChecksSettings(t *testing.T) {
+	k, _ := NewDataKey()
+	c, _ := k.SealedCopy("pass", "Main")
+	for name, change := range map[string]func(m map[string]any){
+		"p=0":         func(m map[string]any) { m["p"] = 0 },
+		"t=0":         func(m map[string]any) { m["t"] = 0 },
+		"t=11":        func(m map[string]any) { m["t"] = 11 },
+		"m of 1 GiB":  func(m map[string]any) { m["m"] = 1 << 20 },
+		"m below 8p":  func(m map[string]any) { m["m"] = 31 },
+		"short salt":  func(m map[string]any) { m["salt"] = "AAAA" },
+		"another kdf": func(m map[string]any) { m["kdf"] = "scrypt" },
+	} {
+		var m map[string]any
+		json.Unmarshal(c.Public, &m)
+		change(m)
+		bad := c
+		bad.Public, _ = json.Marshal(m)
+		bad.GUID, bad.Timestamp = "g", 1
+		if _, err := OpenSealedCopy(bad, "pass"); err == nil || errors.Is(err, ErrPassphrase) {
+			t.Errorf("%s: %v, want the settings refused", name, err)
+		}
+	}
+}
+
+func TestBackupCode(t *testing.T) {
+	k, _ := NewDataKey()
+	code, c, err := k.BackupCode("Printed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(strings.ReplaceAll(code, "-", "")); n != 26 {
+		t.Fatalf("code %q: %d characters, want 26 (128 bits)", code, n)
+	}
+	c.GUID, c.Timestamp = NewGUID(), 1
+	c, _ = k.Seal(c, false)
+	got, err := OpenSealedCopy(c, code)
+	if err != nil || got.ID != k.ID {
+		t.Fatalf("%v", err)
 	}
 }
 
