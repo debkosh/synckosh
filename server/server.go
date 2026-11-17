@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sudiptadeb/synckosh"
@@ -54,6 +55,18 @@ type Tx interface {
 
 // Auth tells the server which bucket a request is for. It returns an error to refuse it.
 type Auth func(r *http.Request) (bucket string, err error)
+
+// Bearer is an Auth for "Authorization: Bearer <token>": it asks the app which bucket a token is
+// for. Making, keeping and revoking tokens is the app's.
+func Bearer(bucket func(token string) (string, error)) Auth {
+	return func(r *http.Request) (string, error) {
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || token == "" {
+			return "", errors.New("no bearer token")
+		}
+		return bucket(token)
+	}
+}
 
 // Server serves the protocol. Each push is one Update of its bucket, which hands out the
 // bucket's sequence numbers in the order its items are stored, with no gaps within one push.

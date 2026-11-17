@@ -246,7 +246,9 @@ copy of the other. The device then sees its real bucket as locked.
 ## The server
 
 JSON over HTTPS. Signing in is the host's business: the server asks it which bucket a request
-belongs to, and every bucket's items are apart.
+belongs to, and every bucket's items are apart. The simplest sign-in is a bearer token,
+`Authorization: Bearer <token>`, for which the host says which bucket a token is for. A request
+the host refuses is answered 401.
 
 | Call | What it does |
 |---|---|

@@ -225,3 +225,44 @@ func TestCleanupNeverReusesANumber(t *testing.T) {
 		t.Fatalf("after cleanup removed number 2: %v %+v", err, res)
 	}
 }
+
+func TestBearer(t *testing.T) {
+	buckets := map[string]string{"t-alice": "alice", "t-bob": "bob"}
+	srv := server.New(openStore(t), server.Bearer(func(token string) (string, error) {
+		if b, ok := buckets[token]; ok {
+			return b, nil
+		}
+		return "", errors.New("unknown token")
+	}))
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	ctx := context.Background()
+	alice, bob := &client.Client{URL: ts.URL, Token: "t-alice"}, &client.Client{URL: ts.URL, Token: "t-bob"}
+	if _, err := alice.Push(ctx, []synckosh.Item{note("a")}); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := alice.Pull(ctx, "", 0, 0); err != nil || len(p.Items) != 1 {
+		t.Fatalf("alice: %v %+v", err, p)
+	}
+	if p, err := bob.Pull(ctx, "", 0, 0); err != nil || len(p.Items) != 0 {
+		t.Fatalf("bob sees alice's bucket: %v %+v", err, p)
+	}
+	local, err := bolt.OpenLocal(filepath.Join(t.TempDir(), "bob.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	r, _ := client.Open(client.Config{Client: bob, Local: local})
+	r.Put(synckosh.Item{Collection: "notes", Datatype: "note"})
+	if err := r.Sync(ctx); err != nil {
+		t.Fatalf("a device signed in with a token: %v", err)
+	}
+	if p, _ := bob.Pull(ctx, "", 0, 0); len(p.Items) != 1 {
+		t.Fatalf("bob's bucket: %+v", p)
+	}
+	for _, c := range []*client.Client{{URL: ts.URL, Token: "t-eve"}, {URL: ts.URL}} {
+		if _, err := c.Pull(ctx, "", 0, 0); err == nil || !strings.Contains(err.Error(), "401") {
+			t.Errorf("token %q: %v, want 401", c.Token, err)
+		}
+	}
+}

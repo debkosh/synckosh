@@ -19,8 +19,9 @@ import (
 
 // Client speaks the protocol, version 1.
 type Client struct {
-	URL  string       // the server, like https://sync.example.com/
-	HTTP *http.Client // carries the sign-in; http.DefaultClient if nil
+	URL   string       // the server, like https://sync.example.com/
+	Token string       // sent as "Authorization: Bearer <Token>" when set
+	HTTP  *http.Client // carries any other sign-in; http.DefaultClient if nil
 }
 
 // TooLargeError is the server refusing a whole push as over its limits, which it sends along.
@@ -79,6 +80,9 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any, mos
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 	hc := c.HTTP
 	if hc == nil {
