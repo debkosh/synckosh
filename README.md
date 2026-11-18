@@ -9,7 +9,8 @@ merger. Devices work offline and pull everything after their cursor. The server 
 `http.Handler` you mount in your own service, behind your own sign-in. Storage is bbolt, or bring
 your own.
 
-**Status:** experimental, protocol version 1, Go only for now. The wire protocol is
+**Status:** experimental, protocol version 1. The server is Go; devices can be Go or
+TypeScript, for browsers and Node ([js/](js)). The wire protocol is
 [SPEC.md](SPEC.md), with test vectors in [testdata/vectors.json](testdata/vectors.json).
 
 **What it is not:** no server-side queries, no real-time push, no partial sync, no sharing with
@@ -17,6 +18,7 @@ revocation, and no changing the data key yet.
 
 ```sh
 go get github.com/sudiptadeb/synckosh
+npm install synckosh
 ```
 
 **What the server can and can't do.** When a bucket has a data key, the server, and anyone who
@@ -73,6 +75,19 @@ if err := r.Sync(ctx); err != nil {
 bookmarks, _ := r.Items("bookmarks")
 ```
 
+The same device in TypeScript, from the `synckosh` npm package:
+
+```ts
+import { Client, MemoryLocal, Replica, create } from 'synckosh';
+
+const c = new Client({ url: 'https://sync.example.com', token });
+const key = await create(c, passphrase, 'Main passphrase'); // join(c, passphrase) on HasKeyError; DataKey.from(id, bytes) later
+const r = await Replica.open({ client: c, local: new MemoryLocal(), key }); // or a Local over IndexedDB
+await r.put({ collection: 'bookmarks', datatype: 'bookmark', public: { order: 'V' }, private: { title: 'Go', url: 'https://go.dev/' } });
+await r.sync();
+const bookmarks = await r.items('bookmarks');
+```
+
 The data key never leaves the device's key store. A person only ever sees a passphrase, or a
 backup code from `key.BackupCode(label)`, each with its own sealed copy that can be removed alone.
 
@@ -99,11 +114,13 @@ Items live in a **bucket** (one synced space, whatever the host makes it), group
 | `client` | a device's `Replica`: put, delete, delete before a cutoff, read and sync every collection, over a `Local` store; `Create` and `Join` |
 | `server` | the server as an `http.Handler`, over a `Store`; `Bearer` sign-in; `storetest` checks any `Store` |
 | `bolt` | a `server.Store` and a `client.Local` in bbolt files |
+| [`js/`](js) | the `synckosh` npm package: the device side in TypeScript, everything above but the server and bolt |
 
 ## Tests
 
 ```sh
 go test -race ./...
+cd js && npm ci && npm test
 ```
 
 They sync devices through a real server and bbolt files. Among them: newest wins, and mergers join
@@ -113,8 +130,9 @@ server's file never holds a private part in the clear; a refill survives a crash
 pushes and pages stay within their bytes, whichever side has the smaller limits; deletes and
 delete-befores leave the devices and the server; a device away past the cleanup age starts over,
 but refills a wiped server; twenty pushes at once number in order on two servers sharing a store;
-and the test vectors.
+and the test vectors. The TypeScript package passes the same vectors, and syncs TypeScript and
+Go devices through a real Go server.
 
 ## Not yet
 
-Changing the data key after a leak, a client outside Go, and a store other than bbolt.
+Changing the data key after a leak, and a store other than bbolt.
