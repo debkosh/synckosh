@@ -1,0 +1,34 @@
+{
+  "name": "synckosh",
+  "version": "0.1.0",
+  "description": "End-to-end encrypted sync for apps that keep the user's data on their devices: the device side, for browsers and Node.",
+  "type": "module",
+  "main": "./dist/synckosh.js",
+  "types": "./dist/synckosh.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/synckosh.d.ts",
+      "import": "./dist/synckosh.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p .",
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node test/vectors.test.mjs && node test/api.test.mjs && node test/sync.test.mjs"
+  },
+  "keywords": ["sync", "e2ee", "end-to-end-encryption", "offline-first", "local-first", "encryption", "xchacha20-poly1305", "argon2id"],
+  "license": "MIT",
+  "author": "Sudipta Deb",
+  "repository": { "type": "git", "url": "git+https://github.com/sudiptadeb/synckosh.git", "directory": "js" },
+  "homepage": "https://github.com/sudiptadeb/synckosh",
+  "engines": { "node": ">=20.19" },
+  "dependencies": {
+    "@noble/ciphers": "2.4.0",
+    "@noble/hashes": "2.4.0"
+  },
+  "devDependencies": {
+    "typescript": "5.6.3"
+  }
+}

@@ -1,2 +1,4 @@
 sync.db*
 server/synckosh-server
+node_modules/
+js/dist/
