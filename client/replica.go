@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -125,37 +126,86 @@ func (r *Replica) open(it synckosh.Item) (synckosh.Item, error) {
 	return r.key.Open(it)
 }
 
-// Put records edits made here, in one write. A new item gets a new guid; an existing one keeps
-// its guid. Timestamps are set here. It returns the items as stored. If any item is invalid,
-// too big to push once sealed, or locked, it returns an error and stores none of them.
+// Put records edits made here, in one write. Every item names its guid: a new one takes one
+// from synckosh.NewGUID, and an edit keeps its item's. Timestamps are set here. It returns the
+// items as stored. If any item can't be stored, being invalid, too big to push once sealed, or
+// locked, it returns a *PutError naming every such item, and stores none of them.
 func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]synckosh.Item, len(its))
+	var bad PutError
 	for i, it := range its {
-		if it.Datatype == synckosh.DeleteBeforeItem {
-			return nil, errors.New("put: a delete-before is written with DeleteBefore")
-		}
-		if it.GUID == "" {
-			it.GUID = synckosh.NewGUID()
-		}
-		old, has, err := r.local.Get(it.Collection, it.GUID)
-		if err != nil {
-			return nil, err
-		}
-		if old.Locked {
-			return nil, fmt.Errorf("%s %s: %w", it.Collection, it.GUID, ErrLocked)
+		it.Deleted, it.Sequence, it.DeletedAt = false, 0, 0
+		var old Entry
+		var has bool
+		if it.GUID != "" {
+			var err error
+			if old, has, err = r.local.Get(it.Collection, it.GUID); err != nil {
+				return nil, err
+			}
 		}
 		if has {
 			it.Extra = old.Item.Extra
 		}
-		it.Deleted, it.Sequence, it.DeletedAt = false, 0, 0
 		out[i] = it
+		switch {
+		case it.GUID == "":
+			bad.add(i, it, errors.New("no guid: every item names one, and a new one takes it from synckosh.NewGUID"))
+		case it.Datatype == synckosh.DeleteBeforeItem:
+			bad.add(i, it, errors.New("a delete-before is written with DeleteBefore"))
+		case old.Locked:
+			bad.add(i, it, ErrLocked)
+		default:
+			// Checked here as well as when written, so one answer names every item.
+			it.Timestamp = max(r.clock.Last(), 1)
+			if err := r.check(it); err != nil {
+				bad.add(i, it, err)
+			}
+		}
+	}
+	if len(bad.Items) > 0 {
+		return nil, &bad
 	}
 	if err := r.write(out...); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// Invalid is one item of a Put that can't be stored: its place in the call, its names, and why.
+type Invalid struct {
+	Index            int
+	Collection, GUID string
+	Reason           string
+	Err              error
+}
+
+// PutError is Put's answer when some of its items can't be stored. It names every one, and none
+// of the items were stored. errors.Is sees each item's error, ErrLocked among them.
+type PutError struct {
+	Items []Invalid
+}
+
+func (e *PutError) add(i int, it synckosh.Item, err error) {
+	e.Items = append(e.Items, Invalid{Index: i, Collection: it.Collection, GUID: it.GUID, Reason: err.Error(), Err: err})
+}
+
+func (e *PutError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "put: %d of the items can't be stored, so none were", len(e.Items))
+	for _, it := range e.Items {
+		fmt.Fprintf(&b, "; item %d (%s %s): %s", it.Index, it.Collection, it.GUID, it.Reason)
+	}
+	return b.String()
+}
+
+func (e *PutError) Unwrap() []error {
+	errs := make([]error, len(e.Items))
+	for i, it := range e.Items {
+		errs[i] = it.Err
+	}
+	return errs
 }
 
 // Delete marks an item deleted. The server keeps it, with its data, until its cleanup. This
@@ -242,13 +292,15 @@ func (r *Replica) cutoff(collection string) (int64, error) {
 }
 
 // write stores edits made here, all with one timestamp, so a write of many items doesn't move
-// the clock ahead of the wall clock.
+// the clock ahead of the wall clock. If any edit can't be stored, it returns a *PutError naming
+// every such edit, and stores none.
 //
 // Each edit's base is the sequence number of the stored version it was made from. An edit of an
 // edit not yet sent keeps that one's base, and its Sent, as the server may hold it already.
 func (r *Replica) write(its ...synckosh.Item) error {
 	ts := r.clock.Now()
 	es := make([]Entry, len(its))
+	var bad PutError
 	for i := range its {
 		e := Entry{Pending: true}
 		its[i].Base = 0
@@ -263,10 +315,13 @@ func (r *Replica) write(its ...synckosh.Item) error {
 		}
 		its[i].Timestamp = ts
 		if err := r.check(its[i]); err != nil {
-			return err
+			bad.add(i, its[i], err)
 		}
 		e.Item = its[i]
 		es[i] = e
+	}
+	if len(bad.Items) > 0 {
+		return &bad
 	}
 	if err := r.local.Put(es...); err != nil {
 		return err
@@ -278,7 +333,7 @@ func (r *Replica) write(its ...synckosh.Item) error {
 // device's item limit once sealed. Left pending, it would be refused on every Sync.
 func (r *Replica) check(it synckosh.Item) error {
 	if err := synckosh.Valid(it); err != nil {
-		return fmt.Errorf("%s %s: %w", it.Collection, it.GUID, err)
+		return err
 	}
 	sealed, err := r.seal(it)
 	if err != nil {
@@ -289,7 +344,7 @@ func (r *Replica) check(it synckosh.Item) error {
 		return err
 	}
 	if len(b) > r.limits.ItemBytes {
-		return fmt.Errorf("%s %s: %d bytes sealed, over the item limit of %d", it.Collection, it.GUID, len(b), r.limits.ItemBytes)
+		return fmt.Errorf("%d bytes sealed, over the item limit of %d", len(b), r.limits.ItemBytes)
 	}
 	return nil
 }
@@ -946,7 +1001,7 @@ func Create(ctx context.Context, c *Client, passphrase, label string) (*synckosh
 	if err != nil {
 		return nil, err
 	}
-	copy.GUID, copy.Timestamp = synckosh.NewGUID(), time.Now().UnixMilli()
+	copy.Timestamp = time.Now().UnixMilli()
 	sealed, err := key.Seal(copy, true)
 	if err != nil {
 		return nil, err

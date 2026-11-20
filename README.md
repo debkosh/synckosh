@@ -66,7 +66,7 @@ if key == nil {
 
 local, _ := bolt.OpenLocal("sync.db")
 r, _ := client.Open(client.Config{Client: c, Local: local, Key: key})
-r.Put(synckosh.Item{Collection: "bookmarks", Datatype: "bookmark",
+r.Put(synckosh.Item{Collection: "bookmarks", Datatype: "bookmark", GUID: synckosh.NewGUID(),
 	Public:  json.RawMessage(`{"order":"V"}`),
 	Private: json.RawMessage(`{"title":"Go","url":"https://go.dev/"}`)})
 if err := r.Sync(ctx); err != nil {
@@ -78,12 +78,12 @@ bookmarks, _ := r.Items("bookmarks")
 The same device in TypeScript, from the `synckosh` npm package:
 
 ```ts
-import { Client, MemoryLocal, Replica, create } from 'synckosh';
+import { Client, MemoryLocal, Replica, create, newGUID } from 'synckosh';
 
 const c = new Client({ url: 'https://sync.example.com', token });
 const key = await create(c, passphrase, 'Main passphrase'); // join(c, passphrase) on HasKeyError; DataKey.from(id, bytes) later
 const r = await Replica.open({ client: c, local: new MemoryLocal(), key }); // or a Local over IndexedDB
-await r.put({ collection: 'bookmarks', datatype: 'bookmark', public: { order: 'V' }, private: { title: 'Go', url: 'https://go.dev/' } });
+await r.put({ collection: 'bookmarks', datatype: 'bookmark', guid: newGUID(), public: { order: 'V' }, private: { title: 'Go', url: 'https://go.dev/' } });
 await r.sync();
 const bookmarks = await r.items('bookmarks');
 ```

@@ -1,6 +1,5 @@
 import { Clock, MaxAhead } from './clock.js';
 import { Client, TooLargeError } from './client.js';
-import { newGUID } from './guid.js';
 import { copyItem, json, toWire, type Item } from './item.js';
 import { DataKey, PassphraseError, UnknownKeyError, openSealedCopy } from './keys.js';
 import type { Entry, Local } from './local.js';
@@ -91,8 +90,34 @@ export interface Config {
   limits?: Limits;
 }
 
-/** An item to put: a new one needs no guid, and the replica sets its timestamp and base. */
-export type PutItem = Pick<Item, 'collection' | 'datatype'> & Partial<Item>;
+/**
+ * An item to put. Every item names its guid: a new one takes one from newGUID, and an edit keeps
+ * its item's. The replica sets its timestamp and base.
+ */
+export type PutItem = Pick<Item, 'collection' | 'datatype' | 'guid'> & Partial<Item>;
+
+/** Invalid is one item of a put that can't be stored: its place in the call, its names, and why. */
+export interface Invalid {
+  index: number;
+  collection: string;
+  guid: string;
+  reason: string;
+  error: Error;
+}
+
+/** PutError is put's answer when some of its items can't be stored. It names every one, and none of the items were stored. */
+export class PutError extends Error {
+  constructor(readonly items: Invalid[]) {
+    super(`put: ${items.length} of the items can't be stored, so none were` +
+      items.map((it) => `; item ${it.index} (${it.collection} ${it.guid}): ${it.reason}`).join(''));
+    this.name = 'PutError';
+  }
+}
+
+function invalid(index: number, it: { collection: string; guid?: string }, e: unknown): Invalid {
+  const error = e instanceof Error ? e : new Error(String(e));
+  return { index, collection: it.collection, guid: it.guid ?? '', reason: error.message, error };
+}
 
 /** Bounds the pull and push rounds of one sync. A round repeats only when the server changed its store id. */
 const maxRounds = 5;
@@ -183,19 +208,27 @@ export class Replica {
   }
 
   /**
-   * put records edits made here, in one write. A new item gets a new guid; an existing one keeps
-   * its guid. Timestamps are set here. It returns the items as stored. If any item is invalid,
-   * too big to push once sealed, or locked, it throws and stores none of them.
+   * put records edits made here, in one write. Every item names its guid: a new one takes one
+   * from newGUID, and an edit keeps its item's. Timestamps are set here. It returns the items as
+   * stored. If any item can't be stored, being invalid, too big to push once sealed, or locked,
+   * it throws a PutError naming every such item, and stores none of them.
    */
   put(...items: PutItem[]): Promise<Item[]> {
     return this.#run(async () => {
       const out: Item[] = [];
-      for (const given of items) {
+      const bad: Invalid[] = [];
+      for (const [i, given] of items.entries()) {
         const it = copyItem({ ...given, guid: given.guid ?? '', timestamp: 0, deleted: false });
-        if (it.datatype === DeleteBeforeItem) throw new Error('put: a delete-before is written with deleteBefore');
-        if (!it.guid) it.guid = newGUID();
-        const old = await this.#local.get(it.collection, it.guid);
-        if (old?.locked) throw new LockedError(what(it.collection, it.guid));
+        const old = it.guid ? await this.#local.get(it.collection, it.guid) : undefined;
+        try {
+          if (!it.guid) throw new Error('no guid: every item names one, and a new one takes it from newGUID');
+          if (it.datatype === DeleteBeforeItem) throw new Error('a delete-before is written with deleteBefore');
+          if (old?.locked) throw new LockedError(what(it.collection, it.guid));
+          // Checked here too, so one answer names every item.
+          this.#check({ ...it, timestamp: Math.max(this.#clock.last(), 1) });
+        } catch (e) {
+          bad.push(invalid(i, it, e));
+        }
         if (old) {
           if (old.item.extra) it.extra = old.item.extra;
           else delete it.extra;
@@ -205,6 +238,7 @@ export class Replica {
         delete it.deletedAt;
         out.push(it);
       }
+      if (bad.length) throw new PutError(bad);
       await this.#write(out);
       return out.map(copyItem);
     });
@@ -280,7 +314,8 @@ export class Replica {
   async #write(items: Item[]) {
     const ts = this.#clock.now();
     const es: Entry[] = [];
-    for (const it of items) {
+    const bad: Invalid[] = [];
+    for (const [i, it] of items.entries()) {
       const e: Entry = { item: it, pending: true };
       delete it.base;
       const old = await this.#local.get(it.collection, it.guid);
@@ -291,24 +326,23 @@ export class Replica {
         it.base = old.item.sequence;
       }
       it.timestamp = ts;
-      this.#check(it);
+      try {
+        this.#check(it);
+      } catch (err) {
+        bad.push(invalid(i, it, err));
+      }
       es.push(e);
     }
+    if (bad.length) throw new PutError(bad);
     await this.#local.put(es);
     await this.#saveClock();
   }
 
   /** Refuses an edit the server would refuse for good: an invalid name, or one over the item limit once sealed. */
   #check(it: Item) {
-    try {
-      valid(it);
-    } catch (e) {
-      throw new Error(`${what(it.collection, it.guid)}: ${(e as Error).message}`);
-    }
+    valid(it);
     const n = new TextEncoder().encode(JSON.stringify(toWire(this.#seal(it)))).length;
-    if (n > this.#limits.itemBytes) {
-      throw new Error(`${what(it.collection, it.guid)}: ${n} bytes sealed, over the item limit of ${this.#limits.itemBytes}`);
-    }
+    if (n > this.#limits.itemBytes) throw new Error(`${n} bytes sealed, over the item limit of ${this.#limits.itemBytes}`);
   }
 
   /**
@@ -709,7 +743,6 @@ export async function create(c: Client, passphrase: string, label: string, signa
   if (p.items.length > 0) throw new HasKeyError();
   const key = DataKey.create();
   const copy = await key.sealedCopy(passphrase, label);
-  copy.guid = newGUID();
   copy.timestamp = Date.now();
   const res = await c.push([key.seal(copy, true)], signal);
   const rs = res.results[0];

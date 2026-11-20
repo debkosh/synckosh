@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   between, less, NoRoomError, newGUID, Clock, MaxAhead, valid, cutoff, validName, DataKey, openSealedCopy,
-  fromWire, toWire, Replica, Client, MemoryLocal, LockedError, KeysCollection, SealedKeyDatatype,
+  fromWire, toWire, Replica, Client, MemoryLocal, LockedError, PutError, KeysCollection, SealedKeyDatatype,
 } from '../dist/synckosh.js';
 import { base32, base64, base64URL, unbase64 } from '../dist/encoding.js';
 
@@ -86,7 +86,7 @@ await test('valid', () => {
   valid({ collection: 'history', datatype: '_deletebefore', guid: '_deletebefore', timestamp: 1, deleted: false, public: { before: 5 } });
   // A name that starts with an underscore is the protocol's by convention, and taken all the same.
   for (const mine of [{ collection: '_x' }, { datatype: '_x' }, { guid: '_x' }]) valid({ ...ok, ...mine });
-  for (const bad of [{ collection: 'Bookmarks' }, { guid: 'a b' }, { timestamp: 0 }, { collection: KeysCollection },
+  for (const bad of [{ collection: 'Bookmarks' }, { guid: 'a b' }, { guid: '' }, { timestamp: 0 }, { collection: KeysCollection },
     { datatype: '_deletebefore', guid: '_deletebefore', public: {} }, { datatype: '_deletebefore', guid: '_deletebefore', public: { before: 5 }, deleted: true }]) {
     assert.throws(() => valid({ ...ok, ...bad }), undefined, JSON.stringify(bad));
   }
@@ -141,25 +141,31 @@ await test('sealed copies and backup codes', async () => {
 await test('a replica records edits here, and leaves the caller\'s items', async () => {
   const local = new MemoryLocal();
   const r = await Replica.open({ client: new Client({ url: 'http://127.0.0.1:1' }), local, key: DataKey.create() });
-  const mine = { collection: 'todos', datatype: 'todo', public: { order: 'V' }, private: { text: 'milk' } };
+  const mine = { collection: 'todos', datatype: 'todo', guid: newGUID(), public: { order: 'V' }, private: { text: 'milk' } };
   const [put] = await r.put(mine);
-  assert.deepEqual(mine, { collection: 'todos', datatype: 'todo', public: { order: 'V' }, private: { text: 'milk' } });
+  assert.deepEqual(mine, { collection: 'todos', datatype: 'todo', guid: put.guid, public: { order: 'V' }, private: { text: 'milk' } });
   put.private.text = 'changed';
   assert.equal((await r.get('todos', put.guid)).private.text, 'milk');
   assert.equal((await r.items('todos')).length, 1);
   assert.equal((await local.pending()).length, 1);
-  await assert.rejects(r.put({ collection: 'Todos', datatype: 'todo' }), /collection/);
-  await assert.rejects(r.put({ collection: 'todos', datatype: 'todo', private: 'x'.repeat(1 << 20) }), /over the item limit/);
+  await assert.rejects(r.put({ collection: 'Todos', datatype: 'todo', guid: newGUID() }), /collection/);
+  await assert.rejects(r.put({ collection: 'todos', datatype: 'todo', guid: newGUID(), private: 'x'.repeat(1 << 20) }), /over the item limit/);
+  // A put with bad items stores none, and names every one by its place in the call.
+  const good = { collection: 'todos', datatype: 'todo', guid: newGUID() };
+  await assert.rejects(r.put(good, { collection: 'todos', datatype: 'todo' }, { ...good, guid: 'todo 1' }, good, { ...good, collection: 'Todos' }),
+    (e) => e instanceof PutError && JSON.stringify(e.items.map((it) => [it.index, it.guid])) === JSON.stringify([[1, ''], [2, 'todo 1'], [4, good.guid]]));
+  assert.equal((await local.pending()).length, 1);
   await r.delete('todos', put.guid);
+  const lockedGUID = newGUID();
   assert.equal((await r.items('todos')).length, 0);
   assert.equal((await r.get('todos', put.guid)).deleted, true);
-  await local.put([{ item: { collection: 'todos', datatype: 'todo', guid: 'locked', timestamp: 1, deleted: false }, locked: true }]);
-  await assert.rejects(r.put({ collection: 'todos', datatype: 'todo', guid: 'locked' }), LockedError);
-  await assert.rejects(r.get('todos', 'locked'), LockedError);
+  await local.put([{ item: { collection: 'todos', datatype: 'todo', guid: lockedGUID, timestamp: 1, deleted: false }, locked: true }]);
+  await assert.rejects(r.put({ collection: 'todos', datatype: 'todo', guid: lockedGUID }), (e) => e instanceof PutError && e.items[0].error instanceof LockedError);
+  await assert.rejects(r.get('todos', lockedGUID), LockedError);
   assert.equal((await r.locked('todos')).length, 1);
   // The clock carries over a restart.
   const again = await Replica.open({ client: new Client({ url: 'http://127.0.0.1:1' }), local });
-  const [next] = await again.put({ collection: 'todos', datatype: 'todo' });
+  const [next] = await again.put({ collection: 'todos', datatype: 'todo', guid: newGUID() });
   assert.ok(next.timestamp > put.timestamp);
 });
 

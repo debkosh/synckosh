@@ -143,8 +143,12 @@ func sync(t *testing.T, ds ...*device) {
 	}
 }
 
+// put puts one item, giving a new one a guid.
 func put(t *testing.T, d *device, it synckosh.Item) synckosh.Item {
 	t.Helper()
+	if it.GUID == "" {
+		it.GUID = synckosh.NewGUID()
+	}
 	its, err := d.Put(it)
 	if err != nil {
 		t.Fatal(err)
@@ -357,7 +361,8 @@ func TestBigPushPagesWithoutLoss(t *testing.T) {
 	mac, phone := e.device("mac"), e.device("phone")
 	var visits []synckosh.Item
 	for i := 0; i < 2500; i++ {
-		visits = append(visits, synckosh.Item{Collection: "history", Datatype: "visit", Private: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))})
+		visits = append(visits, synckosh.Item{Collection: "history", Datatype: "visit", GUID: synckosh.NewGUID(),
+			Private: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))})
 	}
 	if _, err := mac.Put(visits...); err != nil {
 		t.Fatal(err)
@@ -543,7 +548,7 @@ func TestOwnPushDoesNotComeBack(t *testing.T) {
 	mac := e.device("mac")
 	var visits []synckosh.Item
 	for i := 0; i < 1500; i++ {
-		visits = append(visits, synckosh.Item{Collection: "history", Datatype: "visit", Private: json.RawMessage(`{}`)})
+		visits = append(visits, synckosh.Item{Collection: "history", Datatype: "visit", GUID: synckosh.NewGUID(), Private: json.RawMessage(`{}`)})
 	}
 	mac.Put(visits...)
 	put(t, mac, bookmark("root", "Go"))

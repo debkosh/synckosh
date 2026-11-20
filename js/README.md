@@ -10,7 +10,7 @@ npm install synckosh
 ```
 
 ```ts
-import { Client, MemoryLocal, Replica, create, join, HasKeyError } from 'synckosh';
+import { Client, MemoryLocal, Replica, create, join, newGUID, HasKeyError } from 'synckosh';
 
 const client = new Client({ url: 'https://sync.example.com', token });
 let key = await keyFromKeyStore(); // DataKey.from(id, bytes), or undefined on the first run
@@ -22,7 +22,7 @@ if (!key) {
   await saveToKeyStore(key.id, key.bytes());
 }
 const r = await Replica.open({ client, local: new MemoryLocal(), key }); // or your own Local
-await r.put({ collection: 'bookmarks', datatype: 'bookmark', public: { order: 'V' }, private: { title: 'Go', url: 'https://go.dev/' } });
+await r.put({ collection: 'bookmarks', datatype: 'bookmark', guid: newGUID(), public: { order: 'V' }, private: { title: 'Go', url: 'https://go.dev/' } });
 await r.sync(); // throws RefusedError or RejectedError for what didn't sync: the rest did
 const bookmarks = await r.items('bookmarks');
 ```

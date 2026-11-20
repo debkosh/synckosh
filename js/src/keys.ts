@@ -1,6 +1,7 @@
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { argon2idAsync } from '@noble/hashes/argon2.js';
 import { base32, base64, base64URL, random, unbase64, unutf8, utf8 } from './encoding.js';
+import { newGUID } from './guid.js';
 import { json, type Item } from './item.js';
 import { KeysCollection, SealedKeyDatatype } from './wire.js';
 
@@ -192,15 +193,15 @@ export class DataKey {
   }
 
   /**
-   * sealedCopy seals the data key with a passphrase, as an item for KeysCollection, to put as
-   * any item. A bucket can have several, one per passphrase.
+   * sealedCopy seals the data key with a passphrase, as a new item for KeysCollection with its
+   * own guid, to put as any item. A bucket can have several, one per passphrase.
    */
   async sealedCopy(passphrase: string, label: string): Promise<Item> {
     const salt = random(16);
     const p: SealedKey = { label, key: this.id, kdf: 'argon2id', t: argonTime, m: argonMemKB, p: argonPar,
       salt: base64(salt), box: '' };
     p.box = seal(await wrapKey(p, passphrase, salt), this.#key, utf8(this.id));
-    return { collection: KeysCollection, datatype: SealedKeyDatatype, guid: '', timestamp: 0, deleted: false, public: p };
+    return { collection: KeysCollection, datatype: SealedKeyDatatype, guid: newGUID(), timestamp: 0, deleted: false, public: p };
   }
 
   /**

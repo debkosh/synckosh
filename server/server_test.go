@@ -251,7 +251,9 @@ func TestBearer(t *testing.T) {
 	}
 	defer local.Close()
 	r, _ := client.Open(client.Config{Client: bob, Local: local})
-	r.Put(synckosh.Item{Collection: "notes", Datatype: "note"})
+	if _, err := r.Put(synckosh.Item{Collection: "notes", Datatype: "note", GUID: synckosh.NewGUID()}); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.Sync(ctx); err != nil {
 		t.Fatalf("a device signed in with a token: %v", err)
 	}

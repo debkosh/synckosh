@@ -47,7 +47,7 @@ Three levels name where an item lives:
 |---|---|---|
 | `collection` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of collections only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64, not starting with `.` or `-`. |
 | `datatype` | device | what the item is, for the app: `folder`, `bookmark`, `todo`. Same characters. |
-| `guid` | device | the item's name in its collection: any text that is the item's alone in the bucket, of letters, digits and `._:~-`, up to 128. An edit keeps the guid. We suggest a UUIDv7 for a new item ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), which sorts by when it was made; `NewGUID` (`newGUID` in the npm package) makes one. An app that already has an id of its own for the thing may use that. |
+| `guid` | device | the item's name: any text that is the item's alone in the bucket, of letters, digits and `._:~-`, up to 128. The device names every item it writes, a new one included, and an edit keeps the guid. We suggest a UUIDv7 ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), which is unique and sorts by when it was made; `NewGUID` (`newGUID` in the npm package) makes one. |
 | `timestamp` | device | when the edit was made: the device's clock, in milliseconds. |
 | `deleted` | device | true for a deleted item. |
 | `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |

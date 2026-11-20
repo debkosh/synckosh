@@ -232,8 +232,8 @@ func (p sealedKey) wrapKey(passphrase string, salt []byte) []byte {
 	return argon2.IDKey([]byte(passphrase), salt, p.Time, p.MemKB, uint8(p.Par), chacha20poly1305.KeySize)
 }
 
-// SealedCopy seals the data key with a passphrase, as an item for KeysCollection. A bucket can
-// have several, one per passphrase. The device puts it as any item: it is sealed with the data
+// SealedCopy seals the data key with a passphrase, as a new item for KeysCollection with its own
+// guid. A bucket can have several, one per passphrase. The device puts it as any item: it is sealed with the data
 // key too, so the server can't alter or forge one.
 func (k *DataKey) SealedCopy(passphrase, label string) (Item, error) {
 	salt := make([]byte, 16)
@@ -247,7 +247,7 @@ func (k *DataKey) SealedCopy(passphrase, label string) (Item, error) {
 		return Item{}, err
 	}
 	pub, err := json.Marshal(p)
-	return Item{Collection: KeysCollection, Datatype: SealedKeyDatatype, Public: pub}, err
+	return Item{Collection: KeysCollection, Datatype: SealedKeyDatatype, GUID: NewGUID(), Public: pub}, err
 }
 
 // BackupCode makes a random passphrase of 128 bits, for a person to write down or scan, with

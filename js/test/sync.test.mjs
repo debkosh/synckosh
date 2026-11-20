@@ -55,8 +55,8 @@ await test('two devices create, join and see each other\'s items, sealed', async
 
   const a = await device(token, keyA), b = await device(token, keyB);
   const [milk] = await a.put(
-    { collection: 'todos', datatype: 'todo', public: { order: between('', '') }, private: { text: 'milk' } },
-    { collection: 'todos', datatype: 'todo', private: { text: 'eggs' } },
+    { guid: newGUID(), collection: 'todos', datatype: 'todo', public: { order: between('', '') }, private: { text: 'milk' } },
+    { guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'eggs' } },
   );
   await a.sync();
   await b.sync();
@@ -99,8 +99,8 @@ await test('mergers join offline edits; without one the newest wins', async () =
   const union = (l, r) => ({ deleted: false, private: { tags: [...new Set([...l.private.tags, ...r.private.tags])].sort() } });
   const a = await device(token, key, { mergers: { tagset: union } });
   const b = await device(token, key, { mergers: { tagset: union } });
-  const [set] = await a.put({ collection: 'notes', datatype: 'tagset', private: { tags: ['x'] } });
-  const [note] = await a.put({ collection: 'notes', datatype: 'note', private: { text: 'one' } });
+  const [set] = await a.put({ guid: newGUID(), collection: 'notes', datatype: 'tagset', private: { tags: ['x'] } });
+  const [note] = await a.put({ guid: newGUID(), collection: 'notes', datatype: 'note', private: { text: 'one' } });
   await a.sync();
   await b.sync();
   await a.put({ ...set, private: { tags: ['x', 'a'] } }, { ...note, private: { text: 'from a' } });
@@ -119,13 +119,13 @@ await test('a delete-before reaches every device, and pushes fill to the limits'
   const token = bucket();
   const key = await create(new Client({ url, token }), passphrase, 'Main');
   const a = await device(token, key, { limits: { pushItems: 2 } }), b = await device(token, key);
-  for (let i = 0; i < 5; i++) await a.put({ collection: 'history', datatype: 'visit', private: { text: 'old' + i } });
+  for (let i = 0; i < 5; i++) await a.put({ guid: newGUID(), collection: 'history', datatype: 'visit', private: { text: 'old' + i } });
   await a.sync();
   await b.sync();
   assert.equal((await b.items('history')).length, 5);
   await new Promise((r) => setTimeout(r, 5));
   await b.deleteBefore('history', Date.now());
-  await b.put({ collection: 'history', datatype: 'visit', private: { text: 'new' } });
+  await b.put({ guid: newGUID(), collection: 'history', datatype: 'visit', private: { text: 'new' } });
   await b.sync();
   await a.sync();
   assert.deepEqual(await texts(a, 'history'), ['new']);
@@ -139,7 +139,7 @@ await test('after the server loses a bucket, the devices push everything back', 
   const token = bucket();
   const key = await create(new Client({ url, token }), passphrase, 'Main');
   const a = await device(token, key);
-  await a.put({ collection: 'todos', datatype: 'todo', private: { text: 'kept' } });
+  await a.put({ guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'kept' } });
   await a.sync();
   const reset = await fetch(`${url}/test/reset?bucket=${token}`, { method: 'POST' });
   assert.equal(reset.status, 200);
@@ -155,7 +155,7 @@ await test('items under another key are locked, forged ones rejected', async () 
   const a = await device(token, key);
   await a.sync();
   const raw = new Client({ url, token });
-  const base = { collection: 'todos', datatype: 'todo', deleted: false, timestamp: Date.now() };
+  const base = { guid: newGUID(), collection: 'todos', datatype: 'todo', deleted: false, timestamp: Date.now() };
   await raw.push([DataKey.create().seal({ ...base, guid: newGUID(), private: { text: 'other key' } })]);
   const forged = key.seal({ ...base, guid: newGUID(), private: { text: 'real' } });
   await raw.push([{ ...forged, timestamp: forged.timestamp + 1 }]);
@@ -169,10 +169,10 @@ await test('a Go device reads what a TypeScript device wrote, and writes back', 
   const token = bucket();
   const key = await create(new Client({ url, token }), passphrase, 'Main');
   const a = await device(token, key, { sealPublic: ['todo'] });
-  await a.put({ collection: 'todos', datatype: 'todo', public: { order: 'V', t: 'a<b&c é' }, private: { text: 'from ts', n: [1, 2.5] } });
+  await a.put({ guid: newGUID(), collection: 'todos', datatype: 'todo', public: { order: 'V', t: 'a<b&c é' }, private: { text: 'from ts', n: [1, 2.5] } });
   await a.sync();
   const out = execFileSync(path(bin, 'device'), ['sync', url, token, passphrase], {
-    input: JSON.stringify([{ collection: 'todos', datatype: 'todo', public: { order: 'W' }, private: { text: 'from go' } }]),
+    input: JSON.stringify([{ guid: newGUID(), collection: 'todos', datatype: 'todo', public: { order: 'W' }, private: { text: 'from go' } }]),
   });
   const seen = JSON.parse(out.toString());
   const ts = seen.find((it) => it.private.text === 'from ts');

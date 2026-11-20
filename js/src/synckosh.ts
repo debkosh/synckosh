@@ -15,5 +15,5 @@ export { Client, type ClientOptions, TooLargeError, ServerError } from './client
 export { type Entry, type Local, MemoryLocal } from './local.js';
 export {
   Replica, type Config, type Merger, type PutItem, create, join,
-  LockedError, HasKeyError, RefusedError, RejectedError, type Refused, type Rejected,
+  LockedError, HasKeyError, RefusedError, RejectedError, PutError, type Invalid, type Refused, type Rejected,
 } from './replica.js';
