@@ -45,9 +45,9 @@ Three levels name where an item lives:
 
 | Field | Set by | What it is |
 |---|---|---|
-| `collection` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of collections only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64, starting with a letter or digit. |
+| `collection` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of collections only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64, not starting with `.` or `-`. |
 | `datatype` | device | what the item is, for the app: `folder`, `bookmark`, `todo`. Same characters. |
-| `guid` | device | a UUIDv7 for a new item ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), so guids sort by when they were made. An edit keeps the guid. Letters, digits, `._:~-`, up to 128, not starting with `_`. |
+| `guid` | device | the item's name in its collection: any text that is the item's alone in the bucket, of letters, digits and `._:~-`, up to 128. An edit keeps the guid. We suggest a UUIDv7 for a new item ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), which sorts by when it was made; `NewGUID` (`newGUID` in the npm package) makes one. An app that already has an id of its own for the thing may use that. |
 | `timestamp` | device | when the edit was made: the device's clock, in milliseconds. |
 | `deleted` | device | true for a deleted item. |
 | `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |
@@ -60,8 +60,10 @@ Fields a reader doesn't know are kept and written back unchanged, by the server 
 
 ### Reserved names
 
-Names that start with `_` belong to the protocol; an app's names can't start with one. There
-are two:
+Names that start with `_` are the protocol's by convention, and an app does well to start
+none of its own with one, as a later version of the protocol may come to use it. It is a
+convention and no rule: nothing refuses an app's name for its underscore. What the protocol
+does use means what it says here, whoever writes it. There are two:
 - the collection `_sealedkeys` holds the data key's sealed copies, of datatype `_sealedkey`, and
   nothing else;
 - a collection's delete-before has datatype and guid `_deletebefore`, is never deleted, and its

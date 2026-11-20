@@ -80,8 +80,8 @@ export const SealedKeyDatatype = '_sealedkey';
 /** The datatype and guid of a collection's delete-before. */
 export const DeleteBeforeItem = '_deletebefore';
 
-const nameRe = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const guidRe = /^[A-Za-z0-9.:~-][A-Za-z0-9._:~-]{0,127}$/;
+const nameRe = /^[a-z0-9_][a-z0-9._-]{0,63}$/;
+const guidRe = /^[A-Za-z0-9._:~-]{1,128}$/;
 
 /**
  * valid checks an item's names and timestamp, and throws for an invalid one. The server refuses
@@ -95,11 +95,11 @@ export function valid(it: Item): void {
   } else if (cut && (it.datatype !== DeleteBeforeItem || it.guid !== DeleteBeforeItem || it.deleted)) {
     throw new Error(`a collection's ${DeleteBeforeItem} item has that datatype and guid, and is never deleted`);
   } else if (!keys && !nameRe.test(it.collection)) {
-    throw new Error('collection: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot, dash or underscore');
+    throw new Error('collection: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot or dash');
   } else if (!keys && !cut && !nameRe.test(it.datatype)) {
-    throw new Error('datatype: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot, dash or underscore');
+    throw new Error('datatype: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot or dash');
   } else if (!cut && !guidRe.test(it.guid)) {
-    throw new Error('guid: letters, digits and ._:~- up to 128, not starting with underscore');
+    throw new Error('guid: letters, digits and ._:~- up to 128');
   } else if (!(it.timestamp > 0)) {
     throw new Error('timestamp: the time of the edit, in milliseconds');
   }

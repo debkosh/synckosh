@@ -66,8 +66,6 @@ func TestPushRefusesBadItems(t *testing.T) {
 		code string
 	}{
 		{"capital in a collection", item("Notes", "note", "g"), synckosh.RefusedInvalid},
-		{"an app's name starting with an underscore", item("_notes", "note", "g"), synckosh.RefusedInvalid},
-		{"a guid starting with an underscore", item("notes", "note", "_g"), synckosh.RefusedInvalid},
 		{"another datatype in the keys collection", item(synckosh.KeysCollection, "note", "g"), synckosh.RefusedInvalid},
 		{"no timestamp", synckosh.Item{Collection: "notes", Datatype: "note", GUID: "g"}, synckosh.RefusedInvalid},
 		{"over the item limit", big, synckosh.RefusedTooBig},

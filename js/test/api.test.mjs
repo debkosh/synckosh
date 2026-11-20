@@ -84,12 +84,14 @@ await test('valid', () => {
   const ok = { collection: 'bookmarks', datatype: 'bookmark', guid: newGUID(), timestamp: 1, deleted: false };
   valid(ok);
   valid({ collection: 'history', datatype: '_deletebefore', guid: '_deletebefore', timestamp: 1, deleted: false, public: { before: 5 } });
-  for (const bad of [{ collection: 'Bookmarks' }, { datatype: '_x' }, { guid: '_x' }, { timestamp: 0 }, { collection: KeysCollection },
+  // A name that starts with an underscore is the protocol's by convention, and taken all the same.
+  for (const mine of [{ collection: '_x' }, { datatype: '_x' }, { guid: '_x' }]) valid({ ...ok, ...mine });
+  for (const bad of [{ collection: 'Bookmarks' }, { guid: 'a b' }, { timestamp: 0 }, { collection: KeysCollection },
     { datatype: '_deletebefore', guid: '_deletebefore', public: {} }, { datatype: '_deletebefore', guid: '_deletebefore', public: { before: 5 }, deleted: true }]) {
     assert.throws(() => valid({ ...ok, ...bad }), undefined, JSON.stringify(bad));
   }
   assert.equal(cutoff({ ...ok, public: { before: 7 } }), 7);
-  assert.ok(validName(KeysCollection) && validName('a.b') && !validName('_x'));
+  assert.ok(validName(KeysCollection) && validName('a.b') && validName('_x') && !validName('.x'));
 });
 
 await test('items keep fields they do not know', () => {

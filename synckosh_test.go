@@ -301,14 +301,25 @@ func TestValid(t *testing.T) {
 		Public: json.RawMessage(`{"before":5}`)}); err != nil {
 		t.Fatalf("a delete-before: %v", err)
 	}
+	// A name that starts with an underscore is the protocol's by convention, and an app's
+	// own is taken all the same: only the names the protocol does use mean what it says.
+	for name, change := range map[string]func(*Item){
+		"a collection":  func(i *Item) { i.Collection = "_bookmarks" },
+		"a datatype":    func(i *Item) { i.Datatype = "_bookmark" },
+		"a guid":        func(i *Item) { i.GUID = "_g" },
+		"a guid of one": func(i *Item) { i.GUID = "_" },
+	} {
+		it := ok
+		change(&it)
+		if err := Valid(it); err != nil {
+			t.Errorf("%s starting with an underscore: %v", name, err)
+		}
+	}
 	for name, change := range map[string]func(*Item){
 		"capital":                 func(i *Item) { i.Collection = "Bookmarks" },
 		"newline":                 func(i *Item) { i.Datatype = "a\nb" },
-		"reserved collection":     func(i *Item) { i.Collection = "_bookmarks" },
-		"reserved datatype":       func(i *Item) { i.Datatype = "_bookmark" },
 		"sealed key elsewhere":    func(i *Item) { i.Datatype = SealedKeyDatatype },
 		"other type in keys":      func(i *Item) { i.Collection = KeysCollection },
-		"guid with underscore":    func(i *Item) { i.GUID = "_g" },
 		"guid with a space":       func(i *Item) { i.GUID = "a b" },
 		"guid too long":           func(i *Item) { i.GUID = strings.Repeat("a", 129) },
 		"collection too long":     func(i *Item) { i.Collection = strings.Repeat("a", 65) },

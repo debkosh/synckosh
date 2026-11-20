@@ -91,8 +91,8 @@ const (
 )
 
 var (
-	nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-	guidRe = regexp.MustCompile(`^[A-Za-z0-9.:~-][A-Za-z0-9._:~-]{0,127}$`)
+	nameRe = regexp.MustCompile(`^[a-z0-9_][a-z0-9._-]{0,63}$`)
+	guidRe = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
 )
 
 // Valid checks an item's names and timestamp. The server refuses an invalid item, a device
@@ -106,11 +106,11 @@ func Valid(it Item) error {
 	case cut && (it.Datatype != DeleteBeforeItem || it.GUID != DeleteBeforeItem || it.Deleted):
 		return errors.New("a collection's " + DeleteBeforeItem + " item has that datatype and guid, and is never deleted")
 	case !keys && !nameRe.MatchString(it.Collection):
-		return errors.New("collection: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot, dash or underscore")
+		return errors.New("collection: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot or dash")
 	case !keys && !cut && !nameRe.MatchString(it.Datatype):
-		return errors.New("datatype: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot, dash or underscore")
+		return errors.New("datatype: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot or dash")
 	case !cut && !guidRe.MatchString(it.GUID):
-		return errors.New("guid: letters, digits and ._:~- up to 128, not starting with underscore")
+		return errors.New("guid: letters, digits and ._:~- up to 128")
 	case it.Timestamp <= 0:
 		return errors.New("timestamp: the time of the edit, in milliseconds")
 	}
