@@ -33,6 +33,7 @@ func TestAStaleDeviceStartsOver(t *testing.T) {
 	if holds(t, laptop, "bookmarks", gone.GUID) || !holds(t, laptop, "bookmarks", kept.GUID) {
 		t.Fatal("the stale laptop didn't start over")
 	}
+	e.seedKey() // the bucket holds a copy of the key, so the devices heal it
 	if err := e.srv.ResetStore("me"); err != nil {
 		t.Fatal(err)
 	}

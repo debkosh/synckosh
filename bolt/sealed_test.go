@@ -278,7 +278,35 @@ func TestPlainModeWithNoKey(t *testing.T) {
 
 // newServer replaces the server with an empty one, as a server that lost everything, and
 // returns its store. Devices reach it once reopened.
+// newServer moves the bucket to a new, empty server that holds only a sealed copy of the
+// bucket's key, as a server restored from a backup older than every item: the devices heal it.
 func (e *env) newServer() *Store {
+	e.t.Helper()
+	st := e.wipe()
+	e.seedKey()
+	return st
+}
+
+// seedKey pushes a sealed copy of the bucket's key, as Create does on the first device.
+func (e *env) seedKey() {
+	e.t.Helper()
+	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
+	copy, err := e.key.SealedCopy("correct horse battery staple", "Main")
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	copy.Timestamp = time.Now().UnixMilli()
+	sealed, err := e.key.Seal(copy, true)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if res, err := c.Push(context.Background(), []synckosh.Item{sealed}); err != nil || !res.Results[0].OK {
+		e.t.Fatalf("seed the key: %v %+v", err, res)
+	}
+}
+
+// wipe moves the bucket to a new, empty server, as a bucket reset.
+func (e *env) wipe() *Store {
 	e.t.Helper()
 	e.store.Close()
 	st, err := OpenStore(filepath.Join(e.dir, "server-"+synckosh.NewGUID()+".db"))

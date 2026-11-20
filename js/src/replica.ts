@@ -26,6 +26,19 @@ export class LockedError extends Error {
   }
 }
 
+/**
+ * BucketResetError is sync's answer when the server has a new store id and the bucket holds no
+ * sealed copy of this device's key: it was reset, or set up again under another key. The device
+ * pushes nothing and keeps its old store id, so every sync throws the same, until the app sets
+ * sync up again on this device.
+ */
+export class BucketResetError extends Error {
+  constructor() {
+    super('the bucket was reset: set sync up again on this device');
+    this.name = 'BucketResetError';
+  }
+}
+
 /** HasKeyError is create's answer for a bucket that already holds items: join it with a passphrase. */
 export class HasKeyError extends Error {
   constructor() {
@@ -439,15 +452,40 @@ export class Replica {
   }
 
   /**
-   * Compares the server's store id with the one this device last synced with. On a new one,
-   * the device refills the server. The store id is saved last: a crash before repeats the refill.
+   * Compares the server's store id with the one this device last synced with. On a new one, the
+   * server may have lost data. If the bucket still holds a sealed copy of this device's key, as
+   * after a restore from a backup, the device refills it; if none, the bucket was reset, and it
+   * throws BucketResetError. A device without a key refills. The store id is saved last: a crash
+   * before repeats the refill.
    */
-  async #checkStore(id: string): Promise<boolean> {
+  async #checkStore(id: string, signal?: AbortSignal): Promise<boolean> {
     const old = await this.#local.meta('store');
     if (old === id) return false;
-    if (old !== undefined) await this.#refill();
+    if (old !== undefined) {
+      if (this.#key && !(await this.#keyHeld(signal))) throw new BucketResetError();
+      await this.#refill();
+    }
     await this.#local.setMeta('store', id);
     return old !== undefined;
+  }
+
+  /** Whether the bucket holds a live sealed copy of this device's key: one that opens under it. */
+  async #keyHeld(signal?: AbortSignal): Promise<boolean> {
+    let after = 0;
+    for (;;) {
+      const p = await this.#c.pull({ collections: [LibraryCollection], datatypes: [SealedKeyDatatype] }, after,
+        this.#limits.pageBytes, signal);
+      for (const it of p.items) {
+        if (it.deleted) continue;
+        try {
+          valid(it);
+          this.#key!.open(it);
+          return true;
+        } catch {}
+      }
+      if (!p.more) return false;
+      after = p.next;
+    }
   }
 
   /** Marks every entry this device can open pending, to push it all back, and reads from the start. */
@@ -493,7 +531,7 @@ export class Replica {
     let after = await this.#cursor();
     for (;;) {
       const p = await this.#c.pull({}, after, this.#limits.pageBytes, signal);
-      if (await this.#checkStore(p.store)) {
+      if (await this.#checkStore(p.store, signal)) {
         restart = true;
         after = 0;
         continue;
@@ -637,7 +675,7 @@ export class Replica {
         throw err;
       }
       pending = pending.slice(out.length);
-      if (await this.#checkStore(res.store)) return true;
+      if (await this.#checkStore(res.store, signal)) return true;
       const ch = new Changes();
       let lo = 0, hi = 0;
       for (const [i, rs] of res.results.entries()) {

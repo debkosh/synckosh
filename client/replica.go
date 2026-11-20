@@ -559,10 +559,19 @@ func (r *Replica) Sync(ctx context.Context) error {
 	return fmt.Errorf("sync: not settled after %d rounds", maxRounds)
 }
 
+// ErrBucketReset is Sync's answer when the server has a new store id and the bucket holds no
+// sealed copy of this device's key: it was reset, or set up again under another key. The device
+// pushes nothing and keeps its old store id, so every Sync answers the same, until the app sets
+// sync up again on this device: a new replica, which joins with a passphrase or creates a key.
+var ErrBucketReset = errors.New("the bucket was reset: set sync up again on this device")
+
 // checkStore compares the server's store id with the one this device last synced with. On a
-// new one, the server may have lost data, so the device refills it, even when it is stale: it may
-// hold the only copy. The store id is saved last: a crash anywhere before repeats the refill.
-func (r *Replica) checkStore(id string) (bool, error) {
+// new one, the server may have lost data. If the bucket still holds a sealed copy of this
+// device's key, as after a restore from a backup, the device refills it, even when it is stale:
+// it may hold the only copy. If it holds none, the bucket was reset, and the device stops with
+// ErrBucketReset. A device without a key refills. The store id is saved last: a crash anywhere
+// before repeats the refill.
+func (r *Replica) checkStore(ctx context.Context, id string) (bool, error) {
 	old, err := r.local.Meta("store")
 	if err != nil {
 		return false, err
@@ -571,11 +580,45 @@ func (r *Replica) checkStore(id string) (bool, error) {
 		return false, nil
 	}
 	if old != nil { // not the first sync
+		if r.key != nil {
+			held, err := r.keyHeld(ctx)
+			if err != nil {
+				return false, err
+			}
+			if !held {
+				return false, ErrBucketReset
+			}
+		}
 		if err := r.refill(); err != nil {
 			return false, err
 		}
 	}
 	return old != nil, r.local.SetMeta("store", []byte(id))
+}
+
+// keyHeld says whether the bucket holds a live sealed copy of this device's key: one that opens
+// under the key, which proves a holder of the key wrote it.
+func (r *Replica) keyHeld(ctx context.Context) (bool, error) {
+	f := synckosh.Filter{Collections: []string{synckosh.LibraryCollection}, Datatypes: []string{synckosh.SealedKeyDatatype}}
+	var after uint64
+	for {
+		p, err := r.c.Pull(ctx, f, after, r.limits.PageBytes)
+		if err != nil {
+			return false, err
+		}
+		for _, it := range p.Items {
+			if it.Deleted || synckosh.Valid(it) != nil {
+				continue
+			}
+			if _, err := r.key.Open(it); err == nil {
+				return true, nil
+			}
+		}
+		if !p.More {
+			return false, nil
+		}
+		after = p.Next
+	}
 }
 
 // refill marks every entry this device can open pending, to push it all back, and reads from
@@ -670,7 +713,7 @@ func (r *Replica) pull(ctx context.Context, rp *report) (restart bool, err error
 		if err != nil {
 			return false, err
 		}
-		changed, err := r.checkStore(p.Store)
+		changed, err := r.checkStore(ctx, p.Store)
 		if err != nil {
 			return false, err
 		}
@@ -890,7 +933,7 @@ func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error
 			return false, err
 		}
 		pending = pending[len(out):]
-		changed, err := r.checkStore(res.Store)
+		changed, err := r.checkStore(ctx, res.Store)
 		if err != nil {
 			return false, err
 		}

@@ -319,9 +319,19 @@ back later still reaches every device.
 The server makes a store id for each bucket. It changes it, `server.ResetStore`, whenever it
 may have lost any of that bucket's data: a wipe, a restore from a backup, a move to a new host.
 After restoring the whole store from a backup, `server.ResetAll` changes every bucket's.
-A device that sees a store id it didn't sync with last pushes everything it has, live and
-deleted, with the timestamps they were made with, and reads every collection from the start. Newest
-wins settles the rest. A new device meanwhile gets what is there, then the rest as it arrives.
+A device that holds a key and sees a store id it didn't sync with last first reads the
+`sealedkey` items of `_synckosh`, to tell a server that lost data from a bucket that was reset:
+- **A live copy opens under its key:** the server lost some data, or was restored from a backup,
+  and the key survived. The device refills it: it pushes everything it has, live and deleted, with
+  the timestamps they were made with, and reads every collection from the start. Newest wins
+  settles the rest. A new device meanwhile gets what is there, then the rest as it arrives.
+- **None does:** the bucket was reset, or set up again under another key. The device pushes
+  nothing and keeps the store id it had, so every sync stops the same way, `ErrBucketReset`,
+  until the person sets sync up again on it: the first device makes a new key with a passphrase,
+  and the others join with it. This keeps a device away during a reset from filling the new
+  bucket with items its devices can't open.
+
+A device without a key refills on any new store id.
 
 To make that survive a crash, the device marks every entry it can open pending, clears every
 entry's `sequence` and `base`, which mean nothing on the new store, resets its cursor, and saves
@@ -368,8 +378,9 @@ until the app removes those deleted, or before a cutoff, longer ago than an age 
 
 1. Pull from the cursor, every collection at once. Take each item, unless this device's version has
    a later timestamp, rejecting or locking what it can't open, and merging as above.
-2. If the store id changed, refill: mark everything pending, store id last, and start again from
-   the beginning. Otherwise, if this device is away longer than the cleanup age, start over.
+2. If the store id changed, check for a sealed copy of the key and refill: mark everything
+   pending, store id last, and start again from the beginning; or, with no copy, stop, as the
+   bucket was reset. Otherwise, if this device is away longer than the cleanup age, start over.
 3. Push everything changed here. For each `current` that comes back, take it.
 4. If a push's sequence numbers start just after the cursor, nothing else reached the server in
    between, so move the cursor to the last of them: the device doesn't pull its own items back.

@@ -8,7 +8,7 @@ import { join as path } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   Client, MemoryLocal, Replica, create, join, newGUID, DataKey, HasKeyError, PassphraseError,
-  RejectedError, LibraryCollection,
+  RejectedError, BucketResetError, LibraryCollection,
 } from '../dist/synckosh.js';
 
 const repo = new URL('../..', import.meta.url).pathname;
@@ -152,6 +152,22 @@ await test('after the server loses a bucket, the devices push everything back', 
   const b = await device(token, key);
   await b.sync();
   assert.deepEqual(await texts(b, 'todos'), ['kept']);
+});
+
+await test('a bucket with no copy of the key left is reset: the device stops and pushes nothing', async () => {
+  const token = bucket();
+  const key = await create(new Client({ url, token }), passphrase, 'Main');
+  const a = await device(token, key);
+  await a.sync();
+  for (const copy of await a.items(LibraryCollection)) await a.delete(LibraryCollection, copy.guid);
+  await a.put({ guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'mine' } });
+  await a.sync();
+  const before = (await new Client({ url, token }).pull({}, 0)).items.length;
+  const reset = await fetch(`${url}/test/reset?bucket=${token}`, { method: 'POST' });
+  assert.equal(reset.status, 200);
+  await a.put({ guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'after' } });
+  for (let i = 0; i < 2; i++) await assert.rejects(a.sync(), BucketResetError);
+  assert.equal((await new Client({ url, token }).pull({}, 0)).items.length, before);
 });
 
 await test('items under another key are locked, forged ones rejected', async () => {

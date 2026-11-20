@@ -162,6 +162,7 @@ func TestDeleteBefore(t *testing.T) {
 	}
 
 	// A refill pushes the tablet's kept old items; the server answers OK and doesn't store them.
+	e.seedKey() // the bucket holds a copy of the key, so the devices heal it
 	if err := e.srv.ResetStore("me"); err != nil {
 		t.Fatal(err)
 	}
