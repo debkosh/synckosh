@@ -441,7 +441,8 @@ func TestServerChecks(t *testing.T) {
 }
 
 func TestCleanup(t *testing.T) {
-	e := newEnv(t, cleanupAfter(50*time.Millisecond))
+	// The age is long next to a sync's writes, which each wait for the disk.
+	e := newEnv(t, cleanupAfter(time.Second))
 	mac := e.device("mac")
 	b := put(t, mac, bookmark("root", "Go"))
 	keep := put(t, mac, bookmark("root", "Keep"))
@@ -451,7 +452,7 @@ func TestCleanup(t *testing.T) {
 	if n, err := e.srv.Cleanup(); err != nil || n != 0 {
 		t.Fatalf("cleaned a fresh delete: %d %v", n, err)
 	}
-	time.Sleep(60 * time.Millisecond)
+	time.Sleep(1100 * time.Millisecond)
 	if n, err := e.srv.Cleanup(); err != nil || n != 1 {
 		t.Fatalf("cleanup: %d %v", n, err)
 	}
