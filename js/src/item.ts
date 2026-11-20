@@ -4,8 +4,8 @@
  * Item is one synced thing. `public` is plain: the server and a device that hasn't unlocked can
  * read it. `private` is plain on the device and sealed on the wire. Both are any JSON value, or
  * undefined for none. `base` is the sequence number of the version an edit was made from,
- * absent or 0 for none. `sequence` and `deletedAt` are set by the server. Fields a later version
- * adds are kept in `extra` and written back unchanged.
+ * absent or 0 for none. `sequence` and `deletedAt` are set by the server. A field the item
+ * doesn't have is dropped when it is read.
  */
 export interface Item {
   collection: string;
@@ -20,21 +20,17 @@ export interface Item {
   sequence?: number;
   /** The server's clock, in milliseconds, when it stored the delete. */
   deletedAt?: number;
-  extra?: Record<string, unknown>;
 }
 
 /** The JSON object of an item as the wire carries it. */
 export type WireItem = Record<string, unknown>;
-
-const known = new Set(['collection', 'datatype', 'guid', 'timestamp', 'deleted', 'public', 'private', 'base',
-  'sequence', 'deleted_at']);
 
 /**
  * toWire is an item as the wire carries it, with its keys in order, so one item is always the
  * same JSON.
  */
 export function toWire(it: Item): WireItem {
-  const m: WireItem = { ...(it.extra ?? {}) };
+  const m: WireItem = {};
   m.collection = it.collection;
   m.datatype = it.datatype;
   m.guid = it.guid;
@@ -78,9 +74,6 @@ export function fromWire(w: unknown): Item {
   if (base) it.base = base;
   if (sequence) it.sequence = sequence;
   if (deletedAt) it.deletedAt = deletedAt;
-  for (const k of Object.keys(m)) {
-    if (!known.has(k)) (it.extra ??= {})[k] = m[k];
-  }
   return it;
 }
 

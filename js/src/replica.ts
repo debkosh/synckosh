@@ -230,10 +230,6 @@ export class Replica {
         } catch (e) {
           bad.push(invalid(i, it, e));
         }
-        if (old) {
-          if (old.item.extra) it.extra = old.item.extra;
-          else delete it.extra;
-        }
         it.deleted = false;
         delete it.sequence;
         delete it.deletedAt;
@@ -283,7 +279,6 @@ export class Replica {
           held = cutoffOf(old.item).before;
         } catch {}
         cut = Math.max(cut, held);
-        if (old.item.extra) it.extra = old.item.extra;
       }
       it.public = { collection, before: cut };
       await this.#write([it]);

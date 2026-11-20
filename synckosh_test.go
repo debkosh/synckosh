@@ -8,20 +8,20 @@ import (
 	"time"
 )
 
-func TestItemKeepsFieldsItDoesNotKnow(t *testing.T) {
+func TestItemDropsFieldsItDoesNotKnow(t *testing.T) {
 	in := `{"collection":"bookmarks","datatype":"bookmark","guid":"g1","timestamp":5,"deleted":false,"public":{"parent":"f1"},"private":{"key":"k","box":"x"},"sequence":7,"deleted_at":0,"later":2}`
 	var it Item
 	if err := json.Unmarshal([]byte(in), &it); err != nil {
 		t.Fatal(err)
 	}
-	if it.Timestamp != 5 || it.Sequence != 7 || string(it.Extra["later"]) != "2" || string(it.Public) != `{"parent":"f1"}` {
+	if it.Timestamp != 5 || it.Sequence != 7 || string(it.Public) != `{"parent":"f1"}` {
 		t.Fatalf("read %+v", it)
 	}
 	out, err := json.Marshal(it)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"collection":"bookmarks","datatype":"bookmark","deleted":false,"guid":"g1","later":2,"private":{"key":"k","box":"x"},"public":{"parent":"f1"},"sequence":7,"timestamp":5}`
+	want := `{"collection":"bookmarks","datatype":"bookmark","deleted":false,"guid":"g1","private":{"key":"k","box":"x"},"public":{"parent":"f1"},"sequence":7,"timestamp":5}`
 	if string(out) != want {
 		t.Fatalf("wrote\n%s\nwant\n%s", out, want)
 	}

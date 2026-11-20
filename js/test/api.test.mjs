@@ -76,12 +76,13 @@ await test('valid', () => {
   assert.ok(validName(LibraryCollection) && validName('a.b') && !validName('_x') && !validName('.x'));
 });
 
-await test('items keep fields they do not know', () => {
+await test('items drop fields they do not know', () => {
   const w = { collection: 'c', datatype: 'd', guid: 'g', timestamp: 1, deleted: false, later: { x: [1] }, sequence: 4, deleted_at: 9 };
   const it = fromWire(w);
-  assert.deepEqual(it.extra, { later: { x: [1] } });
+  assert.ok(!('later' in it) && !('extra' in it));
   assert.equal(it.deletedAt, 9);
-  assert.equal(JSON.stringify(toWire(it)), JSON.stringify(Object.fromEntries(Object.entries(w).sort(([a], [b]) => (a < b ? -1 : 1)))));
+  const { later, ...known } = w;
+  assert.equal(JSON.stringify(toWire(it)), JSON.stringify(Object.fromEntries(Object.entries(known).sort(([a], [b]) => (a < b ? -1 : 1)))));
   assert.throws(() => fromWire({ ...w, timestamp: '1' }));
 });
 

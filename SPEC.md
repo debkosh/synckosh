@@ -56,7 +56,8 @@ Three levels name where an item lives:
 | `sequence` | server | the server's sequence number for this version: the order it was stored in, from the bucket's own counter, which only goes up. |
 | `deleted_at` | server | the server's clock, in milliseconds, when it first stored the item deleted. |
 
-Fields a reader doesn't know are kept and written back unchanged, by the server and by clients.
+An item has these fields and no others: the server stores none it doesn't know, and a device keeps
+none.
 
 ### The library's collection
 
@@ -243,8 +244,7 @@ person chose protects the data only as well as it was chosen; backup and join co
 128 bits. Removing a passphrase does not change the data key. Every device that holds the key can
 write anything. Without a key, everything is plain and the server is trusted.
 
-The seal leaves out `sequence`, `deleted_at`, the answers' `store` and `next`, and fields a reader
-doesn't know. Lying about them is withholding or replay, which the server can do anyway. A field
+The seal leaves out `sequence`, `deleted_at`, and the answers' `store` and `next`. Lying about them is withholding or replay, which the server can do anyway. A field
 that matters goes into the additional data, which is a new protocol version.
 
 If a person uses one passphrase for two buckets, a server can hand a device joining one the sealed
@@ -377,5 +377,4 @@ until the app removes those deleted, or before a cutoff, longer ago than an age 
 ## Staying compatible
 
 - New collections and datatypes need no change to the server.
-- Fields a reader doesn't know are kept and written back.
 - A change that would break a version 1 client is version 2, under `/v2`.

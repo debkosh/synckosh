@@ -138,15 +138,11 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 	for i, it := range its {
 		it.Deleted, it.Sequence, it.DeletedAt = false, 0, 0
 		var old Entry
-		var has bool
 		if it.GUID != "" {
 			var err error
-			if old, has, err = r.local.Get(it.Collection, it.GUID); err != nil {
+			if old, _, err = r.local.Get(it.Collection, it.GUID); err != nil {
 				return nil, err
 			}
-		}
-		if has {
-			it.Extra = old.Item.Extra
 		}
 		out[i] = it
 		switch {
@@ -252,7 +248,6 @@ func (r *Replica) DeleteBefore(collection string, before time.Time) error {
 	if has {
 		_, held, _ := synckosh.Cutoff(old.Item)
 		cutoff = max(cutoff, held)
-		it.Extra = old.Item.Extra
 	}
 	it.Public, _ = json.Marshal(struct {
 		Collection string `json:"collection"`

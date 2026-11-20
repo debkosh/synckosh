@@ -408,8 +408,7 @@ func TestServerChecks(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		other.Push(ctx, []synckosh.Item{{Collection: "settings", Datatype: "setting", GUID: fmt.Sprint("o", i), Timestamp: now}})
 	}
-	it := synckosh.Item{Collection: "settings", Datatype: "setting", GUID: "setting:theme", Timestamp: now,
-		Extra: map[string]json.RawMessage{"later": json.RawMessage(`{"x":1}`)}}
+	it := synckosh.Item{Collection: "settings", Datatype: "setting", GUID: "setting:theme", Timestamp: now}
 	for i := 0; i < 2; i++ {
 		res, err := c.Push(ctx, []synckosh.Item{it})
 		if err != nil || !res.Results[0].OK {
@@ -419,9 +418,6 @@ func TestServerChecks(t *testing.T) {
 	p, _ := c.Pull(ctx, "settings", 0, 0)
 	if len(p.Items) != 1 || p.Items[0].Sequence != 2 {
 		t.Fatalf("a retried push: want one item, stored again as sequence 2: %+v", p)
-	}
-	if string(p.Items[0].Extra["later"]) != `{"x":1}` {
-		t.Fatalf("the server dropped a field it doesn't know: %+v", p.Items[0])
 	}
 	older := it
 	older.Timestamp--
@@ -620,5 +616,28 @@ func TestClockAheadIsRefusedThenHeals(t *testing.T) {
 	it, has := stored(t, e.store, "bookmarks", ahead.GUID)
 	if !has || it.Timestamp > time.Now().UnixMilli() {
 		t.Fatalf("after the clock is right: %v %+v", has, it)
+	}
+}
+
+// The server stores only the fields an item has: one it doesn't know is dropped, not kept.
+func TestTheServerDropsFieldsItDoesNotKnow(t *testing.T) {
+	e := newEnv(t)
+	h := &http.Client{Transport: signedIn{"me"}}
+	body := fmt.Sprintf(`{"items":[{"collection":"notes","datatype":"note","guid":"n1","timestamp":%d,"deleted":false,"later":{"x":1}}]}`,
+		time.Now().UnixMilli())
+	res, err := h.Post(e.url+"/v1/push", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	res, err = h.Get(e.url + "/v1/pull")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var b bytes.Buffer
+	b.ReadFrom(res.Body)
+	if !strings.Contains(b.String(), `"guid":"n1"`) || strings.Contains(b.String(), "later") {
+		t.Fatalf("pulled %s, want the item without the field", b.String())
 	}
 }

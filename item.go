@@ -13,7 +13,7 @@ import (
 // Item is one synced thing. Public is plain: the server and a device that hasn't unlocked can
 // read it. Private is plain on the device and sealed on the wire. Base is the sequence number of
 // the version an edit was made from, 0 for none. Sequence and DeletedAt are set by the server.
-// Fields a later version adds are kept in Extra and written back unchanged.
+// A field the item doesn't have is dropped when it is read.
 type Item struct {
 	Collection string
 	Datatype   string
@@ -25,17 +25,10 @@ type Item struct {
 	Base       uint64 // the sequence number of the version this edit was made from
 	Sequence   uint64 // the server's sequence number for this version
 	DeletedAt  int64  // the server's clock, in milliseconds, when it stored the delete
-	Extra      map[string]json.RawMessage
 }
 
-var known = map[string]bool{"collection": true, "datatype": true, "guid": true, "timestamp": true, "deleted": true,
-	"public": true, "private": true, "base": true, "sequence": true, "deleted_at": true}
-
 func (it Item) MarshalJSON() ([]byte, error) {
-	m := make(map[string]json.RawMessage, len(it.Extra)+10)
-	for k, v := range it.Extra {
-		m[k] = v
-	}
+	m := make(map[string]json.RawMessage, 10)
 	set := func(k string, v any) {
 		b, _ := json.Marshal(v)
 		m[k] = b
@@ -85,14 +78,6 @@ func (it *Item) UnmarshalJSON(b []byte) error {
 			} else {
 				v.Private = raw
 			}
-		}
-	}
-	for k, raw := range m {
-		if !known[k] {
-			if v.Extra == nil {
-				v.Extra = map[string]json.RawMessage{}
-			}
-			v.Extra[k] = raw
 		}
 	}
 	*it = v
