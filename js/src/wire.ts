@@ -138,6 +138,12 @@ export function cutoff(it: Item): { collection: string; before: number } {
   return { collection, before: before as number };
 }
 
+/** Filter limits a pull to some collections and some datatypes. A missing or empty list allows all: `{}` is every item. */
+export interface Filter {
+  collections?: string[];
+  datatypes?: string[];
+}
+
 /** validName checks a collection name, as a pull asks for one. */
 export function validName(collection: string): boolean {
   return collection === LibraryCollection || nameRe.test(collection);

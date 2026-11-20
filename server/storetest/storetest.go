@@ -39,11 +39,21 @@ func put(t *testing.T, st server.Store, bucket string, its ...synckosh.Item) {
 	}
 }
 
-// since returns "collection/guid@sequence" for each item Since gives.
+// since returns "collection/guid@sequence" for each item Since gives, of one collection or of
+// every collection if collection is empty.
 func since(t *testing.T, st server.Store, bucket, collection string, after uint64, most int) []string {
 	t.Helper()
+	var f synckosh.Filter
+	if collection != "" {
+		f.Collections = []string{collection}
+	}
+	return sinceFiltered(t, st, bucket, f, after, most)
+}
+
+func sinceFiltered(t *testing.T, st server.Store, bucket string, f synckosh.Filter, after uint64, most int) []string {
+	t.Helper()
 	var out []string
-	err := st.Since(bucket, collection, after, func(it synckosh.Item) bool {
+	err := st.Since(bucket, f, after, func(it synckosh.Item) bool {
 		out = append(out, fmt.Sprintf("%s/%s@%d", it.Collection, it.GUID, it.Sequence))
 		return len(out) < most
 	})
@@ -118,12 +128,22 @@ func updateAndSince(t *testing.T, st server.Store) {
 	same(t, "after 1", since(t, st, "a", "", 1, 100), "tasks/t1@2", "notes/n2@3")
 	same(t, "until fn says stop", since(t, st, "a", "", 0, 2), "notes/n1@1", "tasks/t1@2")
 	same(t, "another bucket", since(t, st, "b", "", 0, 100))
+	task := item("notes", "n3", 5)
+	task.Datatype = "task"
+	put(t, st, "a", task)
+	same(t, "two collections", sinceFiltered(t, st, "a", synckosh.Filter{Collections: []string{"tasks", "notes"}}, 0, 100),
+		"notes/n1@1", "tasks/t1@2", "notes/n2@3", "notes/n3@5")
+	same(t, "one datatype", sinceFiltered(t, st, "a", synckosh.Filter{Datatypes: []string{"task"}}, 0, 100), "notes/n3@5")
+	same(t, "a collection and a datatype", sinceFiltered(t, st, "a",
+		synckosh.Filter{Collections: []string{"notes"}, Datatypes: []string{"note"}}, 1, 100), "notes/n2@3")
+	same(t, "until fn says stop, filtered", sinceFiltered(t, st, "a", synckosh.Filter{Collections: []string{"notes"}}, 0, 1),
+		"notes/n1@1")
 
-	put(t, st, "a", item("notes", "n1", 4)) // a new version replaces the old one
-	same(t, "after an edit", since(t, st, "a", "", 0, 100), "tasks/t1@2", "notes/n2@3", "notes/n1@4")
-	same(t, "one collection after an edit", since(t, st, "a", "notes", 0, 100), "notes/n2@3", "notes/n1@4")
-	if n := last(t, st, "a"); n != 4 {
-		t.Fatalf("last %d, want 4", n)
+	put(t, st, "a", item("notes", "n1", 6)) // a new version replaces the old one
+	same(t, "after an edit", since(t, st, "a", "", 0, 100), "tasks/t1@2", "notes/n2@3", "notes/n3@5", "notes/n1@6")
+	same(t, "one collection after an edit", since(t, st, "a", "notes", 0, 100), "notes/n2@3", "notes/n3@5", "notes/n1@6")
+	if n := last(t, st, "a"); n != 6 {
+		t.Fatalf("last %d, want 6", n)
 	}
 	var got synckosh.Item
 	var has bool
@@ -132,7 +152,7 @@ func updateAndSince(t *testing.T, st server.Store) {
 		got, has, err = tx.Get("notes", "n1")
 		return err
 	})
-	if !has || got.Sequence != 4 {
+	if !has || got.Sequence != 6 {
 		t.Fatalf("Get: %v %+v", has, got)
 	}
 	if n := last(t, st, "b"); n != 0 {

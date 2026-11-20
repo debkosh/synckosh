@@ -49,16 +49,14 @@ func (c *Client) Push(ctx context.Context, items []synckosh.Item) (synckosh.Push
 // item a page always holds however big.
 func pageSlack(itemBytes int) int64 { return int64(itemBytes) + 64<<10 }
 
-// Pull returns the items the server stored after the sequence number after: of one collection, or
-// of every collection if collection is empty. The server stops the page at pageBytes of items,
+// Pull returns the items the server stored after the sequence number after that pass the
+// filter; the zero Filter is every item. The server stops the page at pageBytes of items,
 // or its own limit if lower, but always gives at least one; zero means the default limit. The
 // answer is read only that far, with room for one item of the default size.
-func (c *Client) Pull(ctx context.Context, collection string, after uint64, pageBytes int) (synckosh.Page, error) {
+func (c *Client) Pull(ctx context.Context, f synckosh.Filter, after uint64, pageBytes int) (synckosh.Page, error) {
 	limits := synckosh.Limits{PageBytes: pageBytes}.OrDefaults()
-	q := url.Values{"after": {strconv.FormatUint(after, 10)}, "bytes": {strconv.Itoa(limits.PageBytes)}}
-	if collection != "" {
-		q.Set("collection", collection)
-	}
+	q := url.Values{"after": {strconv.FormatUint(after, 10)}, "bytes": {strconv.Itoa(limits.PageBytes)},
+		"collection": f.Collections, "datatype": f.Datatypes}
 	var p synckosh.Page
 	err := c.do(ctx, http.MethodGet, "v1/pull?"+q.Encode(), nil, &p, int64(limits.PageBytes)+pageSlack(limits.ItemBytes))
 	return p, err

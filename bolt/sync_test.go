@@ -415,7 +415,7 @@ func TestServerChecks(t *testing.T) {
 			t.Fatalf("push %d: %v %+v", i, err, res)
 		}
 	}
-	p, _ := c.Pull(ctx, "settings", 0, 0)
+	p, _ := c.Pull(ctx, synckosh.Filter{Collections: []string{"settings"}}, 0, 0)
 	if len(p.Items) != 1 || p.Items[0].Sequence != 2 {
 		t.Fatalf("a retried push: want one item, stored again as sequence 2: %+v", p)
 	}
@@ -432,10 +432,10 @@ func TestServerChecks(t *testing.T) {
 		t.Fatalf("a timestamp two days ahead: %+v %d", r, res.Time)
 	}
 	anon := &client.Client{URL: e.url}
-	if _, err := anon.Pull(ctx, "settings", 0, 0); err == nil {
+	if _, err := anon.Pull(ctx, synckosh.Filter{Collections: []string{"settings"}}, 0, 0); err == nil {
 		t.Fatal("pulled without signing in")
 	}
-	if p, _ := other.Pull(ctx, "", 0, 0); len(p.Items) != 3 {
+	if p, _ := other.Pull(ctx, synckosh.Filter{}, 0, 0); len(p.Items) != 3 {
 		t.Fatalf("another bucket sees my items: %d", len(p.Items))
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"slices"
 	"time"
 
 	bbolt "go.etcd.io/bbolt"
@@ -264,17 +265,26 @@ func remove(all, collection *bbolt.Bucket, gone func(synckosh.Item) bool) (int, 
 	return len(rm), nil
 }
 
-func (s *Store) Since(bucket, collection string, after uint64, fn func(synckosh.Item) bool) error {
+// Since reads one collection's own index when the filter names just one, and the bucket's
+// otherwise, skipping what the filter leaves out.
+func (s *Store) Since(bucket string, f synckosh.Filter, after uint64, fn func(synckosh.Item) bool) error {
 	return s.db.View(func(tx *bbolt.Tx) error {
 		read := func(collection, guid []byte) (bool, error) {
+			if len(f.Collections) > 0 && !slices.Contains(f.Collections, string(collection)) {
+				return true, nil
+			}
 			var it synckosh.Item
 			bk, _ := sub(tx, false, "b", bucket, "c", string(collection), "items")
 			if err := json.Unmarshal(bk.Get(guid), &it); err != nil {
 				return false, err
 			}
+			if !f.Match(it) {
+				return true, nil
+			}
 			return fn(it), nil
 		}
-		if collection != "" {
+		if len(f.Collections) == 1 {
+			collection := f.Collections[0]
 			bk, _ := sub(tx, false, "b", bucket, "c", collection, "seq")
 			if bk == nil {
 				return nil

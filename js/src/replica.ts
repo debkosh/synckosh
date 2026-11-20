@@ -492,7 +492,7 @@ export class Replica {
     let restart = false;
     let after = await this.#cursor();
     for (;;) {
-      const p = await this.#c.pull('', after, this.#limits.pageBytes, signal);
+      const p = await this.#c.pull({}, after, this.#limits.pageBytes, signal);
       if (await this.#checkStore(p.store)) {
         restart = true;
         after = 0;
@@ -716,7 +716,7 @@ function sameContent(a: Pick<Item, 'deleted' | 'public' | 'private'>, b: Pick<It
 export async function join(c: Client, passphrase: string, signal?: AbortSignal): Promise<DataKey> {
   let after = 0;
   for (;;) {
-    const p = await c.pull(LibraryCollection, after, 0, signal);
+    const p = await c.pull({ collections: [LibraryCollection], datatypes: [SealedKeyDatatype] }, after, 0, signal);
     for (const it of p.items) {
       if (it.deleted || it.datatype !== SealedKeyDatatype) continue;
       try {
@@ -735,7 +735,7 @@ export async function join(c: Client, passphrase: string, signal?: AbortSignal):
  * bucket holds any item at all, so two first runs don't make two keys.
  */
 export async function create(c: Client, passphrase: string, label: string, signal?: AbortSignal): Promise<DataKey> {
-  const p = await c.pull('', 0, 0, signal);
+  const p = await c.pull({}, 0, 0, signal);
   if (p.items.length > 0) throw new HasKeyError();
   const key = DataKey.create();
   const copy = await key.sealedCopy(passphrase, label);

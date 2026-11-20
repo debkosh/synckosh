@@ -261,7 +261,7 @@ the host refuses is answered 401.
 |---|---|
 | `GET /v1` | `{"version": 1}` |
 | `POST /v1/push` `{"items": [...]}` | push, below |
-| `GET /v1/pull?after=&collection=&bytes=` | pull, below |
+| `GET /v1/pull?after=&bytes=&collection=&datatype=` | pull, below |
 
 Every answer to push and pull carries `store`: the bucket's store id.
 
@@ -303,9 +303,13 @@ at a time: `{"store", "items": [...], "next": n, "more": bool, "time": ms, "clea
 `time` is the server's clock, and `cleanup` the age after which it removes deleted items, absent
 if it never does. A page holds items up to the lower of the server's page bytes and `bytes`, the
 most the device reads, but always at least one item. The device keeps `next` and passes it as
-`after` next time. A collection another device starts using just shows up. `collection=` limits a
-pull to one collection, for a device joining with a passphrase that reads only `_synckosh`
-first.
+`after` next time. A collection another device starts using just shows up.
+
+`collection=` and `datatype=`, each given once per name, limit a pull to those collections and
+those datatypes; with neither, a pull is of every item. A device joining with a passphrase reads
+the `sealedkey` items of `_synckosh` this way, before anything else; and an app that syncs only
+some of its data reads only those, with a cursor of its own for each choice, as the sequence
+numbers it skips are the other items'.
 
 The pull goes by when the server stored an item, not by when it was made, so an old item pushed
 back later still reaches every device.

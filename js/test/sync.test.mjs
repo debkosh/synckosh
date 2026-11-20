@@ -72,11 +72,16 @@ await test('two devices create, join and see each other\'s items, sealed', async
   assert.equal(await a.get('todos', eggs.guid), undefined); // removed once the server holds the delete
 
   // The server holds only sealed private parts.
-  const raw = await new Client({ url, token }).pull('', 0);
+  const raw = await new Client({ url, token }).pull({}, 0);
   assert.ok(raw.items.length >= 3);
   for (const it of raw.items) assert.deepEqual(Object.keys(it.private).sort().filter((k) => k !== 'public'), ['box', 'key']);
   const wire = JSON.stringify(raw);
   assert.ok(!wire.includes('milk') && !wire.includes('eggs'));
+  // A pull can ask for some collections and datatypes only.
+  const keys = await new Client({ url, token }).pull({ collections: [LibraryCollection], datatypes: ['sealedkey'] }, 0);
+  assert.ok(keys.items.length >= 1 && keys.items.every((it) => it.collection === LibraryCollection && it.datatype === 'sealedkey'));
+  const todos = await new Client({ url, token }).pull({ collections: ['todos', 'notes'], datatypes: ['todo'] }, 0);
+  assert.ok(todos.items.length >= 2 && todos.items.every((it) => it.collection === 'todos'));
 });
 
 await test('a backup code joins a device, and its copy can be removed alone', async () => {

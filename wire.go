@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 )
 
 // What a server answers, the same for both ends.
@@ -159,6 +160,22 @@ func IsDeleteBefore(it Item) bool {
 // ValidName checks a collection name, as a pull asks for one.
 func ValidName(collection string) bool {
 	return collection == LibraryCollection || nameRe.MatchString(collection)
+}
+
+// ValidDatatype checks a datatype name, as a pull asks for one.
+func ValidDatatype(datatype string) bool { return nameRe.MatchString(datatype) }
+
+// Filter limits a pull to some collections and some datatypes. An empty list allows all: the zero
+// Filter is every item.
+type Filter struct {
+	Collections []string
+	Datatypes   []string
+}
+
+// Match says whether an item passes the filter.
+func (f Filter) Match(it Item) bool {
+	return (len(f.Collections) == 0 || slices.Contains(f.Collections, it.Collection)) &&
+		(len(f.Datatypes) == 0 || slices.Contains(f.Datatypes, it.Datatype))
 }
 
 // Marshal writes JSON as the wire carries it: without Go's escaping of <, >, & and U+2028, so a

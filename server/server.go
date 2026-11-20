@@ -27,10 +27,9 @@ type Store interface {
 	SetStoreID(bucket, id string) error
 	// ResetAll gives every bucket a new store id, as after a restore from a backup.
 	ResetAll() error
-	// Since calls fn with the bucket's items whose sequence is above after, lowest first, of one
-	// collection or of every collection if collection is empty, until fn returns false. It sees
-	// only whole Updates, in order.
-	Since(bucket, collection string, after uint64, fn func(synckosh.Item) bool) error
+	// Since calls fn with the bucket's items that pass the filter and whose sequence is above
+	// after, lowest first, until fn returns false. It sees only whole Updates, in order.
+	Since(bucket string, f synckosh.Filter, after uint64, fn func(synckosh.Item) bool) error
 	// Update runs fn as the bucket's only writer: from fn's first call until Update returns, no
 	// other Update of that bucket runs, on this server or any other sharing the store. What fn
 	// puts is stored all together if fn returns nil, and not at all otherwise.
@@ -325,10 +324,18 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 
 func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
 	q := r.URL.Query()
-	collection := q.Get("collection")
-	if collection != "" && !synckosh.ValidName(collection) {
-		fail(w, http.StatusBadRequest, "collection: the collection to pull, or none for every collection")
-		return
+	f := synckosh.Filter{Collections: q["collection"], Datatypes: q["datatype"]}
+	for _, c := range f.Collections {
+		if !synckosh.ValidName(c) {
+			fail(w, http.StatusBadRequest, "collection: a collection to pull, once for each; none for every collection")
+			return
+		}
+	}
+	for _, d := range f.Datatypes {
+		if !synckosh.ValidDatatype(d) {
+			fail(w, http.StatusBadRequest, "datatype: a datatype to pull, once for each; none for every datatype")
+			return
+		}
 	}
 	var after uint64
 	if v := q.Get("after"); v != "" {
@@ -357,7 +364,7 @@ func (s *Server) pull(w http.ResponseWriter, r *http.Request, bucket string) {
 		Cleanup: s.CleanupAfter.Milliseconds()}
 	size := 0
 	var bad error
-	err = s.store.Since(bucket, collection, after, func(it synckosh.Item) bool {
+	err = s.store.Since(bucket, f, after, func(it synckosh.Item) bool {
 		b, err := synckosh.Marshal(it)
 		if err != nil {
 			bad = err

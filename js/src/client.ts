@@ -1,5 +1,5 @@
 import { toWire, type Item } from './item.js';
-import { orDefaults, readLimits, readPage, readPushed, type Limits, type Page, type Pushed } from './wire.js';
+import { orDefaults, readLimits, readPage, readPushed, type Filter, type Limits, type Page, type Pushed } from './wire.js';
 
 /** What a Client needs. */
 export interface ClientOptions {
@@ -56,14 +56,15 @@ export class Client {
   }
 
   /**
-   * pull returns the items the server stored after the sequence number after: of one collection,
-   * or of every collection if collection is empty. The server stops the page at pageBytes of
+   * pull returns the items the server stored after the sequence number after that pass the
+   * filter; `{}` is every item. The server stops the page at pageBytes of
    * items, or its own limit if lower, but always gives at least one; zero means the default.
    */
-  async pull(collection: string, after: number, pageBytes = 0, signal?: AbortSignal): Promise<Page> {
+  async pull(filter: Filter, after: number, pageBytes = 0, signal?: AbortSignal): Promise<Page> {
     const limits = orDefaults({ pageBytes });
     const q = new URLSearchParams({ after: String(after), bytes: String(limits.pageBytes) });
-    if (collection) q.set('collection', collection);
+    for (const c of filter.collections ?? []) q.append('collection', c);
+    for (const d of filter.datatypes ?? []) q.append('datatype', d);
     return readPage(await this.#do('GET', 'v1/pull?' + q, undefined, limits.pageBytes + pageSlack(limits.itemBytes), signal));
   }
 

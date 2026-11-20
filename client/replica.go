@@ -666,7 +666,7 @@ func (r *Replica) pull(ctx context.Context, rp *report) (restart bool, err error
 		return false, err
 	}
 	for {
-		p, err := r.c.Pull(ctx, "", after, r.limits.PageBytes)
+		p, err := r.c.Pull(ctx, synckosh.Filter{}, after, r.limits.PageBytes)
 		if err != nil {
 			return false, err
 		}
@@ -967,7 +967,8 @@ func (r *Replica) fit(server synckosh.Limits) bool {
 func Join(ctx context.Context, c *Client, passphrase string) (*synckosh.DataKey, error) {
 	var after uint64
 	for {
-		p, err := c.Pull(ctx, synckosh.LibraryCollection, after, 0)
+		p, err := c.Pull(ctx, synckosh.Filter{Collections: []string{synckosh.LibraryCollection},
+			Datatypes: []string{synckosh.SealedKeyDatatype}}, after, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -995,7 +996,7 @@ var ErrHasKey = errors.New("the bucket already holds items: join it with a passp
 // the bucket holds any item at all, so two first runs don't make two keys; two at the very same
 // moment still can, and then each device sees the other's items as locked until one joins.
 func Create(ctx context.Context, c *Client, passphrase, label string) (*synckosh.DataKey, error) {
-	p, err := c.Pull(ctx, "", 0, 0)
+	p, err := c.Pull(ctx, synckosh.Filter{}, 0, 0)
 	if err != nil {
 		return nil, err
 	}

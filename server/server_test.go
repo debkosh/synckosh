@@ -125,7 +125,7 @@ func TestPagesStopAtTheirBytes(t *testing.T) {
 		var after uint64
 		got := 0
 		for {
-			p, err := c.Pull(context.Background(), "", after, c2.ask)
+			p, err := c.Pull(context.Background(), synckosh.Filter{}, after, c2.ask)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -202,7 +202,7 @@ func TestSameGUIDTwiceInOnePush(t *testing.T) {
 	if err != nil || !res.Results[0].OK || !res.Results[1].OK || res.Results[1].Sequence != res.Results[0].Sequence+1 {
 		t.Fatalf("%v %+v", err, res)
 	}
-	p, _ := c.Pull(context.Background(), "", 0, 0)
+	p, _ := c.Pull(context.Background(), synckosh.Filter{}, 0, 0)
 	if len(p.Items) != 1 || string(p.Items[0].Public) != `{"v":2}` || p.Items[0].Sequence != 2 {
 		t.Fatalf("want the second, as sequence 2: %+v", p.Items)
 	}
@@ -242,10 +242,10 @@ func TestBearer(t *testing.T) {
 	if _, err := alice.Push(ctx, []synckosh.Item{note("a")}); err != nil {
 		t.Fatal(err)
 	}
-	if p, err := alice.Pull(ctx, "", 0, 0); err != nil || len(p.Items) != 1 {
+	if p, err := alice.Pull(ctx, synckosh.Filter{}, 0, 0); err != nil || len(p.Items) != 1 {
 		t.Fatalf("alice: %v %+v", err, p)
 	}
-	if p, err := bob.Pull(ctx, "", 0, 0); err != nil || len(p.Items) != 0 {
+	if p, err := bob.Pull(ctx, synckosh.Filter{}, 0, 0); err != nil || len(p.Items) != 0 {
 		t.Fatalf("bob sees alice's bucket: %v %+v", err, p)
 	}
 	local, err := bolt.OpenLocal(filepath.Join(t.TempDir(), "bob.db"))
@@ -260,11 +260,11 @@ func TestBearer(t *testing.T) {
 	if err := r.Sync(ctx); err != nil {
 		t.Fatalf("a device signed in with a token: %v", err)
 	}
-	if p, _ := bob.Pull(ctx, "", 0, 0); len(p.Items) != 1 {
+	if p, _ := bob.Pull(ctx, synckosh.Filter{}, 0, 0); len(p.Items) != 1 {
 		t.Fatalf("bob's bucket: %+v", p)
 	}
 	for _, c := range []*client.Client{{URL: ts.URL, Token: "t-eve"}, {URL: ts.URL}} {
-		if _, err := c.Pull(ctx, "", 0, 0); err == nil || !strings.Contains(err.Error(), "401") {
+		if _, err := c.Pull(ctx, synckosh.Filter{}, 0, 0); err == nil || !strings.Contains(err.Error(), "401") {
 			t.Errorf("token %q: %v, want 401", c.Token, err)
 		}
 	}
