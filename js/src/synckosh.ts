@@ -9,7 +9,6 @@ export {
 } from './wire.js';
 export { Clock, MaxAhead } from './clock.js';
 export { newGUID } from './guid.js';
-export { between, less, NoRoomError } from './order.js';
 export { DataKey, openSealedCopy, PassphraseError, UnknownKeyError, NotSealedError } from './keys.js';
 export { Client, type ClientOptions, TooLargeError, ServerError } from './client.js';
 export { type Entry, type Local, MemoryLocal } from './local.js';

@@ -1,6 +1,6 @@
-// Package synckosh holds what clients and servers share: the item, its timestamp, guids,
-// order keys and the keys that seal an item's private part. The protocol is in SPEC.md; the
-// client is in package client and the server in package server.
+// Package synckosh holds what clients and servers share: the item, its timestamp, guids and the
+// keys that seal an item's private part. The protocol is in SPEC.md; the client is in package
+// client and the server in package server.
 package synckosh
 
 import (

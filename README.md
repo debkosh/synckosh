@@ -110,7 +110,7 @@ Items live in a **bucket** (one synced space, whatever the host makes it), group
 
 | Package | What it is |
 |---|---|
-| `synckosh` | the item, its checks, timestamps, UUIDv7 guids, order keys, the data key and passphrase-sealed copies |
+| `synckosh` | the item, its checks, timestamps, UUIDv7 guids, the data key and passphrase-sealed copies |
 | `client` | a device's `Replica`: put, delete, delete before a cutoff, read and sync every collection, over a `Local` store; `Create` and `Join` |
 | `server` | the server as an `http.Handler`, over a `Store`; `Bearer` sign-in; `storetest` checks any `Store` |
 | `bolt` | a `server.Store` and a `client.Local` in bbolt files |

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join as path } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
-  Client, MemoryLocal, Replica, create, join, between, newGUID, DataKey, HasKeyError, PassphraseError,
+  Client, MemoryLocal, Replica, create, join, newGUID, DataKey, HasKeyError, PassphraseError,
   RejectedError, KeysCollection,
 } from '../dist/synckosh.js';
 
@@ -55,7 +55,7 @@ await test('two devices create, join and see each other\'s items, sealed', async
 
   const a = await device(token, keyA), b = await device(token, keyB);
   const [milk] = await a.put(
-    { guid: newGUID(), collection: 'todos', datatype: 'todo', public: { order: between('', '') }, private: { text: 'milk' } },
+    { guid: newGUID(), collection: 'todos', datatype: 'todo', public: { order: 'V' }, private: { text: 'milk' } },
     { guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'eggs' } },
   );
   await a.sync();
@@ -180,26 +180,6 @@ await test('a Go device reads what a TypeScript device wrote, and writes back', 
   assert.deepEqual(ts.public, { order: 'V', t: 'a<b&c é' });
   await a.sync();
   assert.deepEqual(await texts(a, 'todos'), ['from go', 'from ts']);
-});
-
-await test('order keys are the same as Go\'s', () => {
-  const pairs = [['', ''], ['V', 'V0'], ['', '0'], ['W', 'V'], ['', '!'], ['V0', 'V1'], ['zz', ''], ['V', 'V01'], ['0', '1'], ['A0', 'A01']];
-  const keys = [between('', '')];
-  for (let i = 0; i < 300; i++) {
-    const j = Math.floor(Math.random() * (keys.length + 1));
-    const lo = keys[j - 1] ?? '', hi = keys[j] ?? '';
-    pairs.push([lo, hi]);
-    keys.splice(j, 0, between(lo, hi));
-  }
-  const ours = pairs.map(([a, b]) => {
-    try {
-      return between(a, b);
-    } catch (e) {
-      return e.name === 'NoRoomError' ? '!noroom' : '!error';
-    }
-  });
-  const go = JSON.parse(execFileSync(path(bin, 'device'), ['between'], { input: JSON.stringify(pairs) }).toString());
-  assert.deepEqual(ours, go);
 });
 
 server.kill();

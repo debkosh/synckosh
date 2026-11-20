@@ -1,8 +1,8 @@
-// The API without a server: order keys, guids, the clock, names, sealing, sealed copies and a
+// The API without a server: guids, the clock, names, sealing, sealed copies and a
 // replica's own edits.
 import assert from 'node:assert/strict';
 import {
-  between, less, NoRoomError, newGUID, Clock, MaxAhead, valid, cutoff, validName, DataKey, openSealedCopy,
+  newGUID, Clock, MaxAhead, valid, cutoff, validName, DataKey, openSealedCopy,
   fromWire, toWire, Replica, Client, MemoryLocal, LockedError, PutError, KeysCollection, SealedKeyDatatype,
 } from '../dist/synckosh.js';
 import { base32, base64, base64URL, unbase64 } from '../dist/encoding.js';
@@ -29,33 +29,6 @@ await test('encodings are Go\'s', () => {
   assert.equal(base32(new Uint8Array([0xff, 0, 0x10])), '74ABA');
   assert.throws(() => unbase64('QQ=='));
   assert.throws(() => unbase64('Q'));
-});
-
-await test('between keeps a list in order', () => {
-  const keys = [between('', '')];
-  for (let i = 0; i < 2000; i++) {
-    if (i % 3 === 0) keys.unshift(between('', keys[0]));
-    else if (i % 3 === 1) keys.push(between(keys[keys.length - 1], ''));
-    else {
-      const j = keys.length >> 1;
-      keys.splice(j, 0, between(keys[j - 1], keys[j]));
-    }
-  }
-  for (let i = 1; i < keys.length; i++) assert.ok(keys[i - 1] < keys[i], `${keys[i - 1]} ${keys[i]}`);
-  assert.ok(less('a', '2', 'b', '1') && less('a', '1', 'a', '2'));
-});
-
-await test('between without room', () => {
-  for (const [a, b] of [['V', 'V0'], ['', '0'], ['', '000'], ['V', 'V'], ['W', 'V'], ['Vz', 'V']]) {
-    assert.throws(() => between(a, b), NoRoomError, `${a} ${b}`);
-  }
-  for (const [a, b] of [['', '!'], ['a b', ''], ['V', 'é']]) {
-    assert.throws(() => between(a, b), (e) => !(e instanceof NoRoomError));
-  }
-  for (const [a, b] of [['V0', 'V1'], ['zz', ''], ['V', 'V01'], ['0', '1']]) {
-    const k = between(a, b);
-    assert.ok(k > a && (b === '' || k < b) && !k.endsWith('0'));
-  }
 });
 
 await test('guids are UUIDv7 and sort by when made', () => {

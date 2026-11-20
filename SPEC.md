@@ -138,11 +138,8 @@ whatever it chooses:
 - **A parent is just a field.** An item may name another item in its public part. Sync never
   follows it. An item whose parent is missing, deleted or part of a loop is still alive, and the
   app decides how to show it.
-- **Order is a field too.** Two devices can give two items the same order key. `synckosh.Between`
-  is an optional helper that makes a key between two others. Its keys use the digits `0-9`, `A-Z`
-  and `a-z`, which sort as bytes in that order, and never end in `0`, so there is always room
-  between two of them. For two keys with no room between, equal or with the later one the earlier
-  followed only by `0`, it returns an error.
+- **Order is a field too.** How a list is ordered is the app's, like any other data: an order
+  key in an item, or a separate item that holds the order, which syncs as any edit does.
 
 ### Merging
 
