@@ -151,8 +151,8 @@ func TestDeleteBefore(t *testing.T) {
 		t.Fatal(err)
 	}
 	sync(t, tablet, phone)
-	cutItem, _ := stored(t, e.store, "history", synckosh.DeleteBeforeItem)
-	if c, _ := synckosh.Cutoff(cutItem); c != cut.UnixMilli() {
+	cutItem, _ := stored(t, e.store, synckosh.LibraryCollection, synckosh.DeleteBeforeGUID("history"))
+	if _, c, _ := synckosh.Cutoff(cutItem); c != cut.UnixMilli() {
 		t.Fatalf("the cutoff moved back to %d from %d", c, cut.UnixMilli())
 	}
 	for _, d := range []*device{phone, tablet} {
@@ -193,8 +193,9 @@ func TestDeleteBeforeTooFarAheadIsRefused(t *testing.T) {
 	c := &client.Client{URL: e.url, HTTP: &http.Client{Transport: signedIn{"me"}}}
 	now := time.Now()
 	cut := func(ts, before time.Time) synckosh.Item {
-		it, _ := e.key.Seal(synckosh.Item{Collection: "history", Datatype: synckosh.DeleteBeforeItem, GUID: synckosh.DeleteBeforeItem,
-			Timestamp: ts.UnixMilli(), Public: json.RawMessage(fmt.Sprintf(`{"before":%d}`, before.UnixMilli()))}, true)
+		it, _ := e.key.Seal(synckosh.Item{Collection: synckosh.LibraryCollection, Datatype: synckosh.DeleteBeforeDatatype,
+			GUID: synckosh.DeleteBeforeGUID("history"), Timestamp: ts.UnixMilli(),
+			Public: json.RawMessage(fmt.Sprintf(`{"collection":"history","before":%d}`, before.UnixMilli()))}, true)
 		return it
 	}
 	res, err := c.Push(context.Background(), []synckosh.Item{cut(now, now.Add(2*time.Hour))})

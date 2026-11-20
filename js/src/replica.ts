@@ -4,7 +4,8 @@ import { copyItem, json, toWire, type Item } from './item.js';
 import { DataKey, PassphraseError, UnknownKeyError, openSealedCopy } from './keys.js';
 import type { Entry, Local } from './local.js';
 import {
-  cutoff as cutoffOf, DeleteBeforeItem, KeysCollection, orDefaults, RefusedTimestampAhead, valid,
+  cutoff as cutoffOf, DeleteBeforeDatatype, deleteBeforeGUID, isDeleteBefore, LibraryCollection, orDefaults,
+  RefusedTimestampAhead, SealedKeyDatatype, valid, validName,
   type Limits, type Page,
 } from './wire.js';
 
@@ -222,7 +223,7 @@ export class Replica {
         const old = it.guid ? await this.#local.get(it.collection, it.guid) : undefined;
         try {
           if (!it.guid) throw new Error('no guid: every item names one, and a new one takes it from newGUID');
-          if (it.datatype === DeleteBeforeItem) throw new Error('a delete-before is written with deleteBefore');
+          if (isDeleteBefore(it)) throw new Error('a delete-before is written with deleteBefore');
           if (old?.locked) throw new LockedError(what(it.collection, it.guid));
           // Checked here too, so one answer names every item.
           this.#check({ ...it, timestamp: Math.max(this.#clock.last(), 1) });
@@ -271,18 +272,20 @@ export class Replica {
     return this.#run(async () => {
       let cut = typeof before === 'number' ? before : before.getTime();
       if (cut > Date.now() + MaxAhead) throw new Error(`delete before ${new Date(cut).toISOString()}: more than an hour ahead`);
-      const old = await this.#local.get(collection, DeleteBeforeItem);
-      if (old?.locked) throw new LockedError(what(collection, DeleteBeforeItem));
-      const it: Item = { collection, datatype: DeleteBeforeItem, guid: DeleteBeforeItem, timestamp: 0, deleted: false };
+      if (!validName(collection) || collection === LibraryCollection) throw new Error(`delete before: ${JSON.stringify(collection)} is not an app's collection`);
+      const guid = deleteBeforeGUID(collection);
+      const old = await this.#local.get(LibraryCollection, guid);
+      if (old?.locked) throw new LockedError(what(LibraryCollection, guid));
+      const it: Item = { collection: LibraryCollection, datatype: DeleteBeforeDatatype, guid, timestamp: 0, deleted: false };
       if (old) {
         let held = 0;
         try {
-          held = cutoffOf(old.item);
+          held = cutoffOf(old.item).before;
         } catch {}
         cut = Math.max(cut, held);
         if (old.item.extra) it.extra = old.item.extra;
       }
-      it.public = { before: cut };
+      it.public = { collection, before: cut };
       await this.#write([it]);
       await this.#cut(it);
     });
@@ -290,20 +293,19 @@ export class Replica {
 
   /** Follows a delete-before this device wrote or took. */
   async #cut(it: Item) {
-    const cut = cutoffOf(it);
+    const { collection, before: cut } = cutoffOf(it);
     this.#clock.observe(cut);
     if (this.#keepDeleted) return;
-    const gone = (await this.#local.entries(it.collection))
-      .filter((e) => e.item.guid !== DeleteBeforeItem && e.item.timestamp <= cut)
-      .map((e) => e.item.guid);
-    await this.#local.remove(it.collection, gone);
+    const gone = (await this.#local.entries(collection)).filter((e) => e.item.timestamp <= cut).map((e) => e.item.guid);
+    await this.#local.remove(collection, gone);
   }
 
   /** A collection's delete-before cutoff, 0 if it has none this device can open. */
   async #cutoff(collection: string): Promise<number> {
-    const e = await this.#local.get(collection, DeleteBeforeItem);
+    if (collection === LibraryCollection) return 0;
+    const e = await this.#local.get(LibraryCollection, deleteBeforeGUID(collection));
     if (!e || e.locked) return 0;
-    return cutoffOf(e.item);
+    return cutoffOf(e.item).before;
   }
 
   /**
@@ -356,7 +358,7 @@ export class Replica {
       if (!e) return undefined;
       if (e.locked) throw new LockedError(what(collection, guid), e.item);
       const cut = await this.#cutoff(collection);
-      if (guid !== DeleteBeforeItem && e.item.timestamp <= cut) e.item.deleted = true;
+      if (e.item.timestamp <= cut) e.item.deleted = true;
       return e.item;
     });
   }
@@ -370,7 +372,7 @@ export class Replica {
     return this.#run(async () => {
       const cut = await this.#cutoff(collection);
       return (await this.#local.entries(collection))
-        .filter((e) => !e.locked && !e.item.deleted && e.item.guid !== DeleteBeforeItem && e.item.timestamp > cut)
+        .filter((e) => !e.locked && !e.item.deleted && e.item.timestamp > cut)
         .map((e) => e.item);
     });
   }
@@ -395,12 +397,11 @@ export class Replica {
       const all = await this.#local.entries('');
       const cuts = new Map<string, number>();
       for (const e of all) {
-        if (!e.locked && e.item.guid === DeleteBeforeItem && e.item.timestamp < before) {
-          let c = 0;
+        if (!e.locked && isDeleteBefore(e.item) && e.item.timestamp < before) {
           try {
-            c = cutoffOf(e.item);
+            const c = cutoffOf(e.item);
+            cuts.set(c.collection, c.before);
           } catch {}
-          cuts.set(e.item.collection, c);
         }
       }
       const gone = new Changes();
@@ -408,7 +409,7 @@ export class Replica {
       for (const e of all) {
         const it = e.item;
         const deletedAt = it.deletedAt || it.timestamp;
-        if (!e.pending && !e.locked && it.guid !== DeleteBeforeItem &&
+        if (!e.pending && !e.locked && !isDeleteBefore(it) &&
           ((it.deleted && deletedAt < before) || it.timestamp <= (cuts.get(it.collection) ?? 0))) {
           gone.remove(it);
           n++;
@@ -488,7 +489,7 @@ export class Replica {
     await this.#local.put(ch.put);
     for (const [collection, guids] of ch.gone) await this.#local.remove(collection, guids);
     for (const e of ch.put) {
-      if (!e.locked && e.item.guid === DeleteBeforeItem) await this.#cut(e.item);
+      if (!e.locked && isDeleteBefore(e.item)) await this.#cut(e.item);
     }
   }
 
@@ -720,9 +721,9 @@ function sameContent(a: Pick<Item, 'deleted' | 'public' | 'private'>, b: Pick<It
 export async function join(c: Client, passphrase: string, signal?: AbortSignal): Promise<DataKey> {
   let after = 0;
   for (;;) {
-    const p = await c.pull(KeysCollection, after, 0, signal);
+    const p = await c.pull(LibraryCollection, after, 0, signal);
     for (const it of p.items) {
-      if (it.deleted) continue;
+      if (it.deleted || it.datatype !== SealedKeyDatatype) continue;
       try {
         valid(it);
         return await openSealedCopy(it, passphrase);

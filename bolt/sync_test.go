@@ -482,7 +482,7 @@ func TestCreateThenJoinWithPassphrase(t *testing.T) {
 	mac := e.device("mac")
 	put(t, mac, bookmark("root", "Go"))
 	sync(t, mac)
-	if got, _ := mac.Items(synckosh.KeysCollection); len(got) != 1 {
+	if got, _ := mac.Items(synckosh.LibraryCollection); len(got) != 1 {
 		t.Fatalf("the Mac holds %d sealed copies, want the one Create made", len(got))
 	}
 

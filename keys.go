@@ -133,10 +133,10 @@ func unpart(raw []byte) json.RawMessage {
 // Seal returns the item with its private part sealed, an empty one included, bound to every
 // other field the device wrote, so the server can't alter, forge or move it unnoticed. With
 // public, the box also holds a copy of the public part, and a device that opens it uses that
-// copy, so the server can't change the public part either. The library's own items, whose
-// datatypes start with "_", are always sealed with their public part.
+// copy, so the server can't change the public part either. The library's own items, those of
+// LibraryCollection, are always sealed with their public part.
 func (k *DataKey) Seal(it Item, public bool) (Item, error) {
-	public = public || strings.HasPrefix(it.Datatype, "_")
+	public = public || it.Collection == LibraryCollection
 	priv, err := part(it.Private)
 	if err != nil {
 		return Item{}, fmt.Errorf("%s %s: private part: %w", it.Collection, it.GUID, err)
@@ -169,7 +169,7 @@ func (k *DataKey) Open(it Item) (Item, error) {
 	if p.Key != k.ID {
 		return Item{}, fmt.Errorf("%s %s: %w (%s)", it.Collection, it.GUID, ErrUnknownKey, p.Key)
 	}
-	if !p.Public && strings.HasPrefix(it.Datatype, "_") {
+	if !p.Public && it.Collection == LibraryCollection {
 		return Item{}, fmt.Errorf("%s %s: the library's items are sealed with their public part", it.Collection, it.GUID)
 	}
 	plain, err := open(k.key[:], p.Box, additional(it, p.Public))
@@ -232,7 +232,7 @@ func (p sealedKey) wrapKey(passphrase string, salt []byte) []byte {
 	return argon2.IDKey([]byte(passphrase), salt, p.Time, p.MemKB, uint8(p.Par), chacha20poly1305.KeySize)
 }
 
-// SealedCopy seals the data key with a passphrase, as a new item for KeysCollection with its own
+// SealedCopy seals the data key with a passphrase, as a new item for LibraryCollection with its own
 // guid. A bucket can have several, one per passphrase. The device puts it as any item: it is sealed with the data
 // key too, so the server can't alter or forge one.
 func (k *DataKey) SealedCopy(passphrase, label string) (Item, error) {
@@ -247,7 +247,7 @@ func (k *DataKey) SealedCopy(passphrase, label string) (Item, error) {
 		return Item{}, err
 	}
 	pub, err := json.Marshal(p)
-	return Item{Collection: KeysCollection, Datatype: SealedKeyDatatype, GUID: NewGUID(), Public: pub}, err
+	return Item{Collection: LibraryCollection, Datatype: SealedKeyDatatype, GUID: NewGUID(), Public: pub}, err
 }
 
 // BackupCode makes a random passphrase of 128 bits, for a person to write down or scan, with
@@ -270,7 +270,7 @@ func (k *DataKey) BackupCode(label string) (code string, copy Item, err error) {
 // OpenSealedCopy opens a sealed copy, as the server sent it, with its passphrase. The key it
 // opens must also open the item's own seal, which proves a holder of that key wrote the copy.
 func OpenSealedCopy(it Item, passphrase string) (*DataKey, error) {
-	if it.Collection != KeysCollection || it.Datatype != SealedKeyDatatype {
+	if it.Collection != LibraryCollection || it.Datatype != SealedKeyDatatype {
 		return nil, fmt.Errorf("%s %s: not a sealed copy", it.Collection, it.GUID)
 	}
 	if it.Deleted {

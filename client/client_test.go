@@ -45,9 +45,9 @@ func TestPutRefusesWhatTheServerWould(t *testing.T) {
 	r, local := open(t)
 	good := synckosh.Item{Collection: "notes", Datatype: "note", GUID: synckosh.NewGUID(), Private: json.RawMessage(`{"text":"hi"}`)}
 	for name, bad := range map[string]synckosh.Item{
-		"capital in a collection": {Collection: "Notes", Datatype: "note", GUID: synckosh.NewGUID()},
-		"reserved datatype":       {Collection: "notes", Datatype: synckosh.SealedKeyDatatype, GUID: synckosh.NewGUID()},
-		"no guid":                 {Collection: "notes", Datatype: "note"},
+		"capital in a collection":  {Collection: "Notes", Datatype: "note", GUID: synckosh.NewGUID()},
+		"the library's collection": {Collection: synckosh.LibraryCollection, Datatype: "note", GUID: synckosh.NewGUID()},
+		"no guid":                  {Collection: "notes", Datatype: "note"},
 		"over the item limit": {Collection: "notes", Datatype: "note", GUID: synckosh.NewGUID(),
 			Private: json.RawMessage(`"` + strings.Repeat("x", 1<<20) + `"`)},
 	} {

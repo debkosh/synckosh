@@ -85,8 +85,9 @@ func TestTamperedItemsAreRejected(t *testing.T) {
 		"move it to a new guid":  func(i *synckosh.Item) { i.GUID = synckosh.NewGUID() },
 		"move it elsewhere":      func(i *synckosh.Item) { i.Collection = "notes" },
 		"delete everything before now": func(i *synckosh.Item) {
-			*i = synckosh.Item{Collection: "bookmarks", Datatype: synckosh.DeleteBeforeItem, GUID: synckosh.DeleteBeforeItem,
-				Timestamp: later, Public: json.RawMessage(fmt.Sprintf(`{"before":%d}`, real.Timestamp))}
+			*i = synckosh.Item{Collection: synckosh.LibraryCollection, Datatype: synckosh.DeleteBeforeDatatype,
+				GUID: synckosh.DeleteBeforeGUID("bookmarks"), Timestamp: later,
+				Public: json.RawMessage(fmt.Sprintf(`{"collection":"bookmarks","before":%d}`, real.Timestamp))}
 		},
 		"break a name": func(i *synckosh.Item) { i.Collection = "Bookmarks" },
 	} {
@@ -155,8 +156,8 @@ func TestUnknownKeyIsLocked(t *testing.T) {
 		s, _ := server.Seal(it, false)
 		forged = append(forged, s)
 	}
-	cut, _ := server.Seal(synckosh.Item{Collection: "bookmarks", Datatype: synckosh.DeleteBeforeItem, GUID: synckosh.DeleteBeforeItem,
-		Timestamp: later, Public: json.RawMessage(`{"before":1}`)}, false)
+	cut, _ := server.Seal(synckosh.Item{Collection: synckosh.LibraryCollection, Datatype: synckosh.DeleteBeforeDatatype,
+		GUID: synckosh.DeleteBeforeGUID("bookmarks"), Timestamp: later, Public: json.RawMessage(`{"collection":"bookmarks","before":1}`)}, false)
 	forge(t, e.store, append(forged, cut)...)
 	good := put(t, mac, bookmark("root", "Good"))
 	sync(t, mac, phone)
@@ -169,7 +170,10 @@ func TestUnknownKeyIsLocked(t *testing.T) {
 	if got := items(t, phone, "bookmarks"); len(got) != 4 || title(t, phone, good.GUID) != "Good" {
 		t.Fatalf("the phone shows %d bookmarks, want the three and the good one", len(got))
 	}
-	locked, _ := phone.Locked("bookmarks")
+	if locked, _ := phone.Locked("bookmarks"); len(locked) != 0 {
+		t.Fatalf("locked bookmarks: %+v, want none: the phone held every one", locked)
+	}
+	locked, _ := phone.Locked(synckosh.LibraryCollection)
 	if len(locked) != 1 || locked[0].GUID != cut.GUID {
 		t.Fatalf("locked: %+v, want only the delete-before, which the phone held no version of", locked)
 	}
@@ -317,15 +321,15 @@ func TestJoinRefusesARemovedCopyBroughtBack(t *testing.T) {
 	e.key = key
 	mac := e.device("mac")
 	sync(t, mac)
-	copies, _ := mac.Items(synckosh.KeysCollection)
-	if err := mac.Delete(synckosh.KeysCollection, copies[0].GUID); err != nil {
+	copies, _ := mac.Items(synckosh.LibraryCollection)
+	if err := mac.Delete(synckosh.LibraryCollection, copies[0].GUID); err != nil {
 		t.Fatal(err)
 	}
 	sync(t, mac)
 	if _, err := client.Join(ctx, c, "old passphrase"); err == nil {
 		t.Fatal("joined with a removed passphrase")
 	}
-	back, _ := stored(t, e.store, synckosh.KeysCollection, copies[0].GUID)
+	back, _ := stored(t, e.store, synckosh.LibraryCollection, copies[0].GUID)
 	back.Deleted, back.DeletedAt, back.Timestamp = false, 0, back.Timestamp+1
 	forge(t, e.store, back)
 	if _, err := client.Join(ctx, c, "old passphrase"); err == nil {

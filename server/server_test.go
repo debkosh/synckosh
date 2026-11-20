@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -66,7 +67,9 @@ func TestPushRefusesBadItems(t *testing.T) {
 		code string
 	}{
 		{"capital in a collection", item("Notes", "note", "g"), synckosh.RefusedInvalid},
-		{"another datatype in the keys collection", item(synckosh.KeysCollection, "note", "g"), synckosh.RefusedInvalid},
+		{"another datatype in the library's collection", item(synckosh.LibraryCollection, "note", "g"), synckosh.RefusedInvalid},
+		{"a delete-before at another guid", synckosh.Item{Collection: synckosh.LibraryCollection, Datatype: synckosh.DeleteBeforeDatatype,
+			GUID: "g", Timestamp: now, Public: json.RawMessage(`{"collection":"notes","before":1}`)}, synckosh.RefusedInvalid},
 		{"no timestamp", synckosh.Item{Collection: "notes", Datatype: "note", GUID: "g"}, synckosh.RefusedInvalid},
 		{"over the item limit", big, synckosh.RefusedTooBig},
 	} {
@@ -78,7 +81,7 @@ func TestPushRefusesBadItems(t *testing.T) {
 			t.Errorf("%s: %+v, want %s", c2.name, r, c2.code)
 		}
 	}
-	res, err := c.Push(context.Background(), []synckosh.Item{item(synckosh.KeysCollection, synckosh.SealedKeyDatatype, "g")})
+	res, err := c.Push(context.Background(), []synckosh.Item{item(synckosh.LibraryCollection, synckosh.SealedKeyDatatype, "g")})
 	if err != nil || !res.Results[0].OK {
 		t.Fatalf("a sealed copy: %v %+v", err, res)
 	}

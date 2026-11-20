@@ -8,7 +8,7 @@ import { join as path } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   Client, MemoryLocal, Replica, create, join, newGUID, DataKey, HasKeyError, PassphraseError,
-  RejectedError, KeysCollection,
+  RejectedError, LibraryCollection,
 } from '../dist/synckosh.js';
 
 const repo = new URL('../..', import.meta.url).pathname;
@@ -87,7 +87,7 @@ await test('a backup code joins a device, and its copy can be removed alone', as
   const [stored] = await a.put(copy);
   await a.sync();
   assert.equal((await join(new Client({ url, token }), code)).id, key.id);
-  await a.delete(KeysCollection, stored.guid);
+  await a.delete(LibraryCollection, stored.guid);
   await a.sync();
   await assert.rejects(join(new Client({ url, token }), code), PassphraseError);
   assert.equal((await join(new Client({ url, token }), passphrase)).id, key.id);

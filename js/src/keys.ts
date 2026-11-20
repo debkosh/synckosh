@@ -3,7 +3,7 @@ import { argon2idAsync } from '@noble/hashes/argon2.js';
 import { base32, base64, base64URL, random, unbase64, unutf8, utf8 } from './encoding.js';
 import { newGUID } from './guid.js';
 import { json, type Item } from './item.js';
-import { KeysCollection, SealedKeyDatatype } from './wire.js';
+import { LibraryCollection, SealedKeyDatatype } from './wire.js';
 
 /** PassphraseError: no sealed copy opens with this passphrase. */
 export class PassphraseError extends Error {
@@ -147,7 +147,7 @@ export class DataKey {
    * public part.
    */
   seal(it: Item, pub = false): Item {
-    pub = pub || it.datatype.startsWith('_');
+    pub = pub || it.collection === LibraryCollection;
     const plain = pub ? `[${json(it.public)},${json(it.private)}]` : json(it.private);
     const part: SealedPart = { key: this.id, box: seal(this.#key, utf8(plain), utf8(additional(it, pub))) };
     if (pub) part.public = true;
@@ -168,7 +168,7 @@ export class DataKey {
     }
     if (p.key !== this.id) throw new UnknownKeyError(what(it), p.key);
     const pub = p.public === true;
-    if (!pub && it.datatype.startsWith('_')) {
+    if (!pub && it.collection === LibraryCollection) {
       throw new Error(`${what(it)}: the library's items are sealed with their public part`);
     }
     let plain: unknown;
@@ -193,7 +193,7 @@ export class DataKey {
   }
 
   /**
-   * sealedCopy seals the data key with a passphrase, as a new item for KeysCollection with its
+   * sealedCopy seals the data key with a passphrase, as a new item for LibraryCollection with its
    * own guid, to put as any item. A bucket can have several, one per passphrase.
    */
   async sealedCopy(passphrase: string, label: string): Promise<Item> {
@@ -201,7 +201,7 @@ export class DataKey {
     const p: SealedKey = { label, key: this.id, kdf: 'argon2id', t: argonTime, m: argonMemKB, p: argonPar,
       salt: base64(salt), box: '' };
     p.box = seal(await wrapKey(p, passphrase, salt), this.#key, utf8(this.id));
-    return { collection: KeysCollection, datatype: SealedKeyDatatype, guid: newGUID(), timestamp: 0, deleted: false, public: p };
+    return { collection: LibraryCollection, datatype: SealedKeyDatatype, guid: newGUID(), timestamp: 0, deleted: false, public: p };
   }
 
   /**
@@ -220,7 +220,7 @@ export class DataKey {
  * It throws PassphraseError when the passphrase doesn't open it.
  */
 export async function openSealedCopy(it: Item, passphrase: string): Promise<DataKey> {
-  if (it.collection !== KeysCollection || it.datatype !== SealedKeyDatatype) throw new Error(`${what(it)}: not a sealed copy`);
+  if (it.collection !== LibraryCollection || it.datatype !== SealedKeyDatatype) throw new Error(`${what(it)}: not a sealed copy`);
   if (it.deleted) throw new Error(`${it.guid}: the sealed copy was removed`);
   const p = it.public as SealedKey;
   if (typeof p !== 'object' || p === null || Array.isArray(p)) throw new Error('sealed key: public part is not an object');

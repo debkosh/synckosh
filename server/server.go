@@ -48,8 +48,7 @@ type Tx interface {
 	Get(collection, guid string) (synckosh.Item, bool, error)
 	// Put stores items, each replacing its guid's version. Last becomes the highest stored.
 	Put(items []synckosh.Item) error
-	// RemoveBefore removes every item of a collection with a timestamp at or before before,
-	// except its synckosh.DeleteBeforeItem.
+	// RemoveBefore removes every item of a collection with a timestamp at or before before.
 	RemoveBefore(collection string, before int64) error
 }
 
@@ -166,7 +165,7 @@ func (s *Server) check(raw json.RawMessage, limits synckosh.Limits) (synckosh.It
 	if it.Timestamp > ahead {
 		return it, refused(synckosh.RefusedTimestampAhead, "timestamp is more than an hour ahead of the server's clock")
 	}
-	if cutoff, _ := synckosh.Cutoff(it); it.Datatype == synckosh.DeleteBeforeItem && cutoff > ahead {
+	if _, cutoff, _ := synckosh.Cutoff(it); synckosh.IsDeleteBefore(it) && cutoff > ahead {
 		return it, refused(synckosh.RefusedTimestampAhead, "the cutoff is more than an hour ahead of the server's clock")
 	}
 	it.Sequence, it.DeletedAt = 0, 0 // the server's to set
@@ -225,11 +224,11 @@ func (s *Server) push(w http.ResponseWriter, r *http.Request, bucket string) {
 // store keeps what a push brings, inside its bucket's Update: each item, unless the bucket holds
 // a version with a later timestamp. It numbers what it stores on from the bucket's last number.
 //
-// A collection's delete-before item is the one item the server reads. Storing one removes every
-// item of the collection at or before its cutoff, and from then on such an item is answered OK
-// and not stored, so a refill or a device away for long can't bring it back. A delete-before
-// with an earlier cutoff than the one held is answered with the one held: the cutoff only moves
-// forward.
+// A collection's delete-before, in synckosh.LibraryCollection, is the one item the server reads.
+// Storing one removes every item of its collection at or before its cutoff, and from then on such
+// an item is answered OK and not stored, so a refill or a device away for long can't bring it
+// back. A delete-before with an earlier cutoff than the one held is answered with the one held:
+// the cutoff only moves forward.
 func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]synckosh.Result, error) {
 	seq, err := tx.Last()
 	if err != nil {
@@ -250,12 +249,12 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 		if c, ok := cutoffs[collection]; ok {
 			return c, nil
 		}
-		it, has, err := get(collection, synckosh.DeleteBeforeItem)
+		it, has, err := get(synckosh.LibraryCollection, synckosh.DeleteBeforeGUID(collection))
 		if err != nil || !has {
 			cutoffs[collection] = 0
 			return 0, err
 		}
-		cutoffs[collection], _ = synckosh.Cutoff(it)
+		_, cutoffs[collection], _ = synckosh.Cutoff(it)
 		return cutoffs[collection], nil
 	}
 	for i, it := range in {
@@ -263,11 +262,15 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 			res[i] = *errs[i]
 			continue
 		}
-		held, err := cutoff(it.Collection)
+		isCut := synckosh.IsDeleteBefore(it)
+		target, newCut := it.Collection, int64(0)
+		if isCut {
+			target, newCut, _ = synckosh.Cutoff(it)
+		}
+		held, err := cutoff(target)
 		if err != nil {
 			return nil, err
 		}
-		isCut := it.Datatype == synckosh.DeleteBeforeItem
 		if !isCut && it.Timestamp <= held {
 			res[i] = synckosh.Result{OK: true} // deleted already
 			continue
@@ -276,7 +279,6 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 		if err != nil {
 			return nil, err
 		}
-		newCut, _ := synckosh.Cutoff(it)
 		if has && (it.Timestamp < cur.Timestamp || isCut && newCut < held) {
 			c := cur
 			res[i] = synckosh.Result{Current: &c}
@@ -299,7 +301,7 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 			out = append(out, it)
 		}
 		if isCut {
-			cutoffs[it.Collection] = newCut
+			cutoffs[target] = newCut
 		}
 		res[i] = synckosh.Result{OK: true, Sequence: seq}
 	}
@@ -311,8 +313,9 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 	}
 	// Remove what the push's delete-befores cover, its own earlier items included.
 	for _, it := range out {
-		if it.Datatype == synckosh.DeleteBeforeItem {
-			if err := tx.RemoveBefore(it.Collection, cutoffs[it.Collection]); err != nil {
+		if synckosh.IsDeleteBefore(it) {
+			target, _, _ := synckosh.Cutoff(it)
+			if err := tx.RemoveBefore(target, cutoffs[target]); err != nil {
 				return nil, err
 			}
 		}

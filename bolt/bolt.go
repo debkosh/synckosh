@@ -224,7 +224,7 @@ func (t *storeTx) RemoveBefore(collection string, before int64) error {
 		return nil
 	}
 	_, err := remove(t.bkt.Bucket([]byte("seq")), bk, func(it synckosh.Item) bool {
-		return it.GUID != synckosh.DeleteBeforeItem && it.Timestamp <= before
+		return it.Timestamp <= before
 	})
 	return err
 }

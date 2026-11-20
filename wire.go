@@ -80,61 +80,85 @@ func (l Limits) OrDefaults() Limits {
 	return l
 }
 
-// Names the library owns start with "_", which an app's names can't. The sealed copies of the
-// data key are items of datatype SealedKeyDatatype in KeysCollection, and nothing else is. A
-// collection's DeleteBeforeItem, the one item with that datatype and guid, deletes every item of
-// the collection with a timestamp at or before its cutoff.
+// LibraryCollection is the one name the protocol keeps for itself: the collection of the
+// library's own items. It holds the data key's sealed copies, of datatype SealedKeyDatatype, and
+// each collection's delete-before, of datatype DeleteBeforeDatatype, and nothing else. An app's
+// collections are its own, and so is every datatype outside this collection.
 const (
-	KeysCollection    = "_sealedkeys"
-	SealedKeyDatatype = "_sealedkey"
-	DeleteBeforeItem  = "_deletebefore"
+	LibraryCollection    = "_synckosh"
+	SealedKeyDatatype    = "sealedkey"
+	DeleteBeforeDatatype = "deletebefore"
 )
 
+// DeleteBeforeGUID is the guid of a collection's delete-before, the same on every device, so a
+// collection has one.
+func DeleteBeforeGUID(collection string) string { return "deletebefore:" + collection }
+
 var (
-	nameRe = regexp.MustCompile(`^[a-z0-9_][a-z0-9._-]{0,63}$`)
+	nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	guidRe = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
 )
 
-// Valid checks an item's names and timestamp. The server refuses an invalid item, a device
-// won't put one, and a device takes none from the server.
+// Valid checks an item's names and timestamp, and for the library's own items what the protocol
+// reads in them. The server refuses an invalid item, a device won't put one, and a device takes
+// none from the server.
 func Valid(it Item) error {
-	keys := it.Collection == KeysCollection || it.Datatype == SealedKeyDatatype
-	cut := it.Datatype == DeleteBeforeItem || it.GUID == DeleteBeforeItem
+	lib := it.Collection == LibraryCollection
 	switch {
-	case keys && (it.Collection != KeysCollection || it.Datatype != SealedKeyDatatype):
-		return errors.New("the " + KeysCollection + " collection holds only " + SealedKeyDatatype + " items")
-	case cut && (it.Datatype != DeleteBeforeItem || it.GUID != DeleteBeforeItem || it.Deleted):
-		return errors.New("a collection's " + DeleteBeforeItem + " item has that datatype and guid, and is never deleted")
-	case !keys && !nameRe.MatchString(it.Collection):
-		return errors.New("collection: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot or dash")
-	case !keys && !cut && !nameRe.MatchString(it.Datatype):
-		return errors.New("datatype: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot or dash")
-	case !cut && !guidRe.MatchString(it.GUID):
+	case !lib && !nameRe.MatchString(it.Collection):
+		return errors.New("collection: lowercase letters, digits, dot, dash or underscore, up to 64, starting with a letter or digit")
+	case !nameRe.MatchString(it.Datatype):
+		return errors.New("datatype: lowercase letters, digits, dot, dash or underscore, up to 64, starting with a letter or digit")
+	case !guidRe.MatchString(it.GUID):
 		return errors.New("guid: letters, digits and ._:~- up to 128")
 	case it.Timestamp <= 0:
 		return errors.New("timestamp: the time of the edit, in milliseconds")
+	case !lib:
+		return nil
 	}
-	if cut {
-		_, err := Cutoff(it)
-		return err
+	switch it.Datatype {
+	case SealedKeyDatatype:
+		return nil
+	case DeleteBeforeDatatype:
+		collection, _, err := Cutoff(it)
+		switch {
+		case err != nil:
+			return err
+		case it.GUID != DeleteBeforeGUID(collection):
+			return errors.New("a delete-before's guid is DeleteBeforeGUID of its collection")
+		case it.Deleted:
+			return errors.New("a delete-before is never deleted")
+		}
+		return nil
 	}
-	return nil
+	return errors.New("the " + LibraryCollection + " collection holds only " + SealedKeyDatatype + " and " +
+		DeleteBeforeDatatype + " items")
 }
 
-// Cutoff returns the cutoff of a DeleteBeforeItem, from its public part {"before": ms}.
-func Cutoff(it Item) (int64, error) {
+// Cutoff reads a delete-before: the collection it deletes from, and its cutoff, from its public
+// part {"collection": name, "before": milliseconds}.
+func Cutoff(it Item) (collection string, before int64, err error) {
 	var p struct {
-		Before int64 `json:"before"`
+		Collection string `json:"collection"`
+		Before     int64  `json:"before"`
 	}
-	if json.Unmarshal(it.Public, &p) != nil || p.Before <= 0 {
-		return 0, errors.New(DeleteBeforeItem + `: public part {"before": milliseconds}`)
+	if it.Collection != LibraryCollection || it.Datatype != DeleteBeforeDatatype {
+		return "", 0, errors.New("not a delete-before")
 	}
-	return p.Before, nil
+	if json.Unmarshal(it.Public, &p) != nil || !nameRe.MatchString(p.Collection) || p.Before <= 0 {
+		return "", 0, errors.New(`a delete-before's public part is {"collection": an app's collection, "before": milliseconds}`)
+	}
+	return p.Collection, p.Before, nil
+}
+
+// IsDeleteBefore says whether an item is a delete-before.
+func IsDeleteBefore(it Item) bool {
+	return it.Collection == LibraryCollection && it.Datatype == DeleteBeforeDatatype
 }
 
 // ValidName checks a collection name, as a pull asks for one.
 func ValidName(collection string) bool {
-	return collection == KeysCollection || nameRe.MatchString(collection)
+	return collection == LibraryCollection || nameRe.MatchString(collection)
 }
 
 // Marshal writes JSON as the wire carries it: without Go's escaping of <, >, & and U+2028, so a

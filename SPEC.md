@@ -45,8 +45,8 @@ Three levels name where an item lives:
 
 | Field | Set by | What it is |
 |---|---|---|
-| `collection` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of collections only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64, not starting with `.` or `-`. |
-| `datatype` | device | what the item is, for the app: `folder`, `bookmark`, `todo`. Same characters. |
+| `collection` | device | the kind of data: `bookmarks`, `logins`, `history`. The server learns of collections only from items. Lowercase letters, digits, `.`, `-`, `_`, up to 64, starting with a letter or digit; `_synckosh`, below, is the one other. |
+| `datatype` | device | what the item is, for the app: `folder`, `bookmark`, `todo`. Lowercase letters, digits, `.`, `-`, `_`, up to 64, starting with a letter or digit. |
 | `guid` | device | the item's name: any text that is the item's alone in the bucket, of letters, digits and `._:~-`, up to 128. The device names every item it writes, a new one included, and an edit keeps the guid. We suggest a UUIDv7 ([RFC 9562](https://www.rfc-editor.org/rfc/rfc9562)), which is unique and sorts by when it was made; `NewGUID` (`newGUID` in the npm package) makes one. |
 | `timestamp` | device | when the edit was made: the device's clock, in milliseconds. |
 | `deleted` | device | true for a deleted item. |
@@ -58,18 +58,18 @@ Three levels name where an item lives:
 
 Fields a reader doesn't know are kept and written back unchanged, by the server and by clients.
 
-### Reserved names
+### The library's collection
 
-Names that start with `_` are the protocol's by convention, and an app does well to start
-none of its own with one, as a later version of the protocol may come to use it. It is a
-convention and no rule: nothing refuses an app's name for its underscore. What the protocol
-does use means what it says here, whoever writes it. There are two:
-- the collection `_sealedkeys` holds the data key's sealed copies, of datatype `_sealedkey`, and
-  nothing else;
-- a collection's delete-before has datatype and guid `_deletebefore`, is never deleted, and its
-  public part is `{"before": <milliseconds>}`.
+The protocol keeps one name for itself: the collection `_synckosh`, which holds the library's own
+items, and only these two kinds:
+- **`sealedkey`:** a sealed copy of the data key, below. Its guid is any, as for any item.
+- **`deletebefore`:** a collection's delete-before, below. Its public part is
+  `{"collection": "<the collection>", "before": <milliseconds>}`, naming an app's collection; its
+  guid is `deletebefore:` followed by that collection's name, so a collection has one; and it is
+  never deleted.
 
-A server refuses, and a device neither writes nor takes, an item that breaks these rules.
+Every other collection, and every datatype outside `_synckosh`, is the app's. A server refuses,
+and a device neither writes nor takes, an item that breaks these rules.
 
 ### Timestamps
 
@@ -110,8 +110,8 @@ copy of the public part. Base64 is the standard alphabet without padding; the bo
   ignores the one outside, which is there for the server and for devices that can't open the item.
   Without the copy, the public part outside is not checked: the server could change it unnoticed,
   but nothing else.
-- **The library's own items**, whose datatypes start with `_`, are always sealed with their public
-  part, and a device refuses one that isn't.
+- **The library's own items**, those of `_synckosh`, are always sealed with their public part,
+  and a device refuses one that isn't.
 
 A device that holds the key takes from the server only items it can open:
 - **Rejected:** an item that is invalid, not sealed, or whose seal doesn't open under the key: the
@@ -178,14 +178,14 @@ the new store, where a device may merge once for no reason, or miss one merge.
 ### Deleting before a cutoff
 
 A collection's delete-before deletes every item of the collection whose timestamp is at or before
-its cutoff, `before`. Deleting a browser's history is one such item, not one delete per visit.
+its cutoff, `before`. Deleting a browser's history is one such item, not one delete per visit. It
+is an item of `_synckosh`, above, that names its collection.
 
-- **There is one per collection**, an ordinary item for newest wins: its timestamp is when it was
-  written. A device writing one uses the later of the cutoff there and the one asked for, so the
+- **There is one per collection**, by its guid, an ordinary item for newest wins: its timestamp is
+  when it was written. A device writing one uses the later of the cutoff there and the one asked for, so the
   cutoff only moves forward, and the library always seals it with its public part.
 - **The server reads it:** it is the one item whose content the server interprets. On storing one,
-  in the same write, it removes every item of the collection at or before the cutoff; the
-  delete-before itself stays. From then on it answers a pushed item of the collection at or before
+  in the same write, it removes every item of the collection at or before the cutoff. From then on it answers a pushed item of the collection at or before
   the cutoff `{"ok": true}`, with no sequence number, and doesn't store it, so a refill or a device
   away for long can't bring it back. It answers a delete-before with an earlier cutoff than the one
   it holds with `current`. It refuses one whose cutoff is more than the ahead limit past its clock,
@@ -202,14 +202,14 @@ its cutoff, `before`. Deleting a browser's history is one such item, not one del
   no copy on screen. Anything a person sees, writes down or scans, such as a backup code or a QR
   code to join a device, is a random passphrase with its own sealed copy, so it can be removed on
   its own.
-- **Each passphrase seals its own copy** of the data key, as an item in the `_sealedkeys`
-  collection, datatype `_sealedkey`. Its public part is what a device that hasn't unlocked can
+- **Each passphrase seals its own copy** of the data key, as an item in the `_synckosh`
+  collection, datatype `sealedkey`. Its public part is what a device that hasn't unlocked can
   read: `{"label", "key", "kdf", "t", "m", "p", "salt", "box"}`. `key` is the data key's id; `kdf`
   is `argon2id`, with `t` passes, `m` KiB of memory and `p` lanes, over the base64 `salt`, making
   32 bytes; `box` is the data key's 32 bytes sealed with XChaCha20-Poly1305 under those 32 bytes,
   with the data key's id as additional data. The copy is then sealed with the data key like any
   item, with its public part.
-- **Joining a device:** it pulls `_sealedkeys`, asks for a passphrase, and for a live copy checks
+- **Joining a device:** it pulls `_synckosh`, asks for a passphrase, and for a live copy checks
   the settings first, since it can't verify them yet: `kdf` is `argon2id`, `1 <= t <= 10`,
   `1 <= p <= 16`, `8p <= m <= 262144`, and the salt is 8 to 64 bytes. It opens `box` with the
   passphrase, then checks the copy's own seal with the key it got, which proves a holder of that
@@ -304,7 +304,7 @@ at a time: `{"store", "items": [...], "next": n, "more": bool, "time": ms, "clea
 if it never does. A page holds items up to the lower of the server's page bytes and `bytes`, the
 most the device reads, but always at least one item. The device keeps `next` and passes it as
 `after` next time. A collection another device starts using just shows up. `collection=` limits a
-pull to one collection, for a device joining with a passphrase that reads only `_sealedkeys`
+pull to one collection, for a device joining with a passphrase that reads only `_synckosh`
 first.
 
 The pull goes by when the server stored an item, not by when it was made, so an old item pushed

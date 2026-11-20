@@ -73,52 +73,74 @@ export function orDefaults(l: Limits = {}): Required<Limits> {
   };
 }
 
-/** The collection of the data key's sealed copies. */
-export const KeysCollection = '_sealedkeys';
+/**
+ * The one name the protocol keeps for itself: the collection of the library's own items. It holds
+ * the data key's sealed copies, of datatype SealedKeyDatatype, and each collection's
+ * delete-before, of datatype DeleteBeforeDatatype, and nothing else. An app's collections are its
+ * own, and so is every datatype outside this collection.
+ */
+export const LibraryCollection = '_synckosh';
 /** The datatype of a sealed copy of the data key. */
-export const SealedKeyDatatype = '_sealedkey';
-/** The datatype and guid of a collection's delete-before. */
-export const DeleteBeforeItem = '_deletebefore';
+export const SealedKeyDatatype = 'sealedkey';
+/** The datatype of a collection's delete-before. */
+export const DeleteBeforeDatatype = 'deletebefore';
 
-const nameRe = /^[a-z0-9_][a-z0-9._-]{0,63}$/;
+/** deleteBeforeGUID is the guid of a collection's delete-before, the same on every device, so a collection has one. */
+export function deleteBeforeGUID(collection: string): string {
+  return 'deletebefore:' + collection;
+}
+
+const nameRe = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const guidRe = /^[A-Za-z0-9._:~-]{1,128}$/;
 
 /**
- * valid checks an item's names and timestamp, and throws for an invalid one. The server refuses
- * an invalid item, a device won't put one, and a device takes none from the server.
+ * valid checks an item's names and timestamp, and for the library's own items what the protocol
+ * reads in them. It throws for an invalid one. The server refuses an invalid item, a device won't
+ * put one, and a device takes none from the server.
  */
 export function valid(it: Item): void {
-  const keys = it.collection === KeysCollection || it.datatype === SealedKeyDatatype;
-  const cut = it.datatype === DeleteBeforeItem || it.guid === DeleteBeforeItem;
-  if (keys && (it.collection !== KeysCollection || it.datatype !== SealedKeyDatatype)) {
-    throw new Error(`the ${KeysCollection} collection holds only ${SealedKeyDatatype} items`);
-  } else if (cut && (it.datatype !== DeleteBeforeItem || it.guid !== DeleteBeforeItem || it.deleted)) {
-    throw new Error(`a collection's ${DeleteBeforeItem} item has that datatype and guid, and is never deleted`);
-  } else if (!keys && !nameRe.test(it.collection)) {
-    throw new Error('collection: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot or dash');
-  } else if (!keys && !cut && !nameRe.test(it.datatype)) {
-    throw new Error('datatype: lowercase letters, digits, dot, dash or underscore, up to 64, not starting with dot or dash');
-  } else if (!cut && !guidRe.test(it.guid)) {
+  const lib = it.collection === LibraryCollection;
+  if (!lib && !nameRe.test(it.collection)) {
+    throw new Error('collection: lowercase letters, digits, dot, dash or underscore, up to 64, starting with a letter or digit');
+  } else if (!nameRe.test(it.datatype)) {
+    throw new Error('datatype: lowercase letters, digits, dot, dash or underscore, up to 64, starting with a letter or digit');
+  } else if (!guidRe.test(it.guid)) {
     throw new Error('guid: letters, digits and ._:~- up to 128');
   } else if (!(it.timestamp > 0)) {
     throw new Error('timestamp: the time of the edit, in milliseconds');
   }
-  if (cut) cutoff(it);
+  if (!lib || it.datatype === SealedKeyDatatype) return;
+  if (it.datatype !== DeleteBeforeDatatype) {
+    throw new Error(`the ${LibraryCollection} collection holds only ${SealedKeyDatatype} and ${DeleteBeforeDatatype} items`);
+  }
+  const { collection } = cutoff(it);
+  if (it.guid !== deleteBeforeGUID(collection)) throw new Error("a delete-before's guid is deleteBeforeGUID of its collection");
+  if (it.deleted) throw new Error('a delete-before is never deleted');
 }
 
-/** cutoff returns the cutoff of a delete-before, from its public part `{"before": ms}`. */
-export function cutoff(it: Item): number {
-  const p = it.public as { before?: unknown } | undefined;
-  const before = typeof p === 'object' && p !== null && !Array.isArray(p) ? p.before ?? 0 : undefined;
-  if (!Number.isSafeInteger(before) || (before as number) <= 0) {
-    throw new Error(`${DeleteBeforeItem}: public part {"before": milliseconds}`);
+/** isDeleteBefore says whether an item is a delete-before. */
+export function isDeleteBefore(it: Item): boolean {
+  return it.collection === LibraryCollection && it.datatype === DeleteBeforeDatatype;
+}
+
+/**
+ * cutoff reads a delete-before: the collection it deletes from, and its cutoff, from its public
+ * part `{"collection": name, "before": ms}`.
+ */
+export function cutoff(it: Item): { collection: string; before: number } {
+  if (!isDeleteBefore(it)) throw new Error('not a delete-before');
+  const p = it.public as { collection?: unknown; before?: unknown } | undefined;
+  const ok = typeof p === 'object' && p !== null && !Array.isArray(p);
+  const collection = ok ? p.collection : undefined, before = ok ? p.before : undefined;
+  if (typeof collection !== 'string' || !nameRe.test(collection) || !Number.isSafeInteger(before) || (before as number) <= 0) {
+    throw new Error(`a delete-before's public part is {"collection": an app's collection, "before": milliseconds}`);
   }
-  return before as number;
+  return { collection, before: before as number };
 }
 
 /** validName checks a collection name, as a pull asks for one. */
 export function validName(collection: string): boolean {
-  return collection === KeysCollection || nameRe.test(collection);
+  return collection === LibraryCollection || nameRe.test(collection);
 }
 
 /** @internal Reads a push answer. */

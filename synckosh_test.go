@@ -115,7 +115,7 @@ func TestSealWithThePublicPart(t *testing.T) {
 		t.Fatalf("want the public part from the box: %v %s %s", err, o.Public, o.Private)
 	}
 	// The library's own items are always sealed with their public part, and refused without.
-	own := Item{Collection: KeysCollection, Datatype: SealedKeyDatatype, GUID: "g", Timestamp: 1, Public: json.RawMessage(`{}`)}
+	own := Item{Collection: LibraryCollection, Datatype: SealedKeyDatatype, GUID: "g", Timestamp: 1, Public: json.RawMessage(`{}`)}
 	if s, _ := k.Seal(own, false); !strings.Contains(string(s.Private), `"public":true`) {
 		t.Fatalf("a library item sealed without its public part: %s", s.Private)
 	}
@@ -135,7 +135,7 @@ func TestSealedCopies(t *testing.T) {
 		return c
 	}
 	a, b := sealedCopy("correct horse battery staple", "Main"), sealedCopy("a second passphrase", "Spare")
-	if strings.Contains(string(a.Public), "correct") || a.Collection != KeysCollection {
+	if strings.Contains(string(a.Public), "correct") || a.Collection != LibraryCollection {
 		t.Fatalf("%s", a.Public)
 	}
 	if _, err := OpenSealedCopy(a, "wrong"); !errors.Is(err, ErrPassphrase) {
@@ -228,42 +228,50 @@ func TestValid(t *testing.T) {
 	if err := Valid(ok); err != nil {
 		t.Fatal(err)
 	}
-	if err := Valid(Item{Collection: KeysCollection, Datatype: SealedKeyDatatype, GUID: "g", Timestamp: 1}); err != nil {
+	if err := Valid(Item{Collection: LibraryCollection, Datatype: SealedKeyDatatype, GUID: NewGUID(), Timestamp: 1}); err != nil {
 		t.Fatalf("a sealed copy: %v", err)
 	}
-	if err := Valid(Item{Collection: "history", Datatype: DeleteBeforeItem, GUID: DeleteBeforeItem, Timestamp: 1,
-		Public: json.RawMessage(`{"before":5}`)}); err != nil {
+	cut := Item{Collection: LibraryCollection, Datatype: DeleteBeforeDatatype, GUID: DeleteBeforeGUID("history"), Timestamp: 1,
+		Public: json.RawMessage(`{"collection":"history","before":5}`)}
+	if err := Valid(cut); err != nil {
 		t.Fatalf("a delete-before: %v", err)
 	}
-	// A name that starts with an underscore is the protocol's by convention, and an app's
-	// own is taken all the same: only the names the protocol does use mean what it says.
+	if c, before, err := Cutoff(cut); c != "history" || before != 5 || err != nil {
+		t.Fatalf("Cutoff: %q %d %v", c, before, err)
+	}
+	// A guid is any text of its characters, an underscore first included; the library's names
+	// mean something only in its own collection.
 	for name, change := range map[string]func(*Item){
-		"a collection":  func(i *Item) { i.Collection = "_bookmarks" },
-		"a datatype":    func(i *Item) { i.Datatype = "_bookmark" },
-		"a guid":        func(i *Item) { i.GUID = "_g" },
-		"a guid of one": func(i *Item) { i.GUID = "_" },
+		"a guid starting with an underscore": func(i *Item) { i.GUID = "_g" },
+		"a guid of one underscore":           func(i *Item) { i.GUID = "_" },
+		"a guid with a colon":                func(i *Item) { i.GUID = "setting:theme" },
+		"a datatype of the library's":        func(i *Item) { i.Datatype = SealedKeyDatatype },
 	} {
 		it := ok
 		change(&it)
 		if err := Valid(it); err != nil {
-			t.Errorf("%s starting with an underscore: %v", name, err)
+			t.Errorf("%s: %v", name, err)
 		}
 	}
 	for name, change := range map[string]func(*Item){
-		"capital":                 func(i *Item) { i.Collection = "Bookmarks" },
-		"newline":                 func(i *Item) { i.Datatype = "a\nb" },
-		"sealed key elsewhere":    func(i *Item) { i.Datatype = SealedKeyDatatype },
-		"other type in keys":      func(i *Item) { i.Collection = KeysCollection },
-		"guid with a space":       func(i *Item) { i.GUID = "a b" },
-		"guid too long":           func(i *Item) { i.GUID = strings.Repeat("a", 129) },
-		"collection too long":     func(i *Item) { i.Collection = strings.Repeat("a", 65) },
-		"no timestamp":            func(i *Item) { i.Timestamp = 0 },
-		"delete-before guid only": func(i *Item) { i.GUID = DeleteBeforeItem },
-		"delete-before type only": func(i *Item) { i.Datatype = DeleteBeforeItem; i.Public = json.RawMessage(`{"before":1}`) },
-		"delete-before deleted": func(i *Item) {
-			i.Datatype, i.GUID, i.Deleted, i.Public = DeleteBeforeItem, DeleteBeforeItem, true, json.RawMessage(`{"before":1}`)
+		"capital":                           func(i *Item) { i.Collection = "Bookmarks" },
+		"newline":                           func(i *Item) { i.Datatype = "a\nb" },
+		"a collection starting with _":      func(i *Item) { i.Collection = "_bookmarks" },
+		"a datatype starting with _":        func(i *Item) { i.Datatype = "_bookmark" },
+		"another datatype in the library's": func(i *Item) { i.Collection = LibraryCollection },
+		"guid with a space":                 func(i *Item) { i.GUID = "a b" },
+		"no guid":                           func(i *Item) { i.GUID = "" },
+		"guid too long":                     func(i *Item) { i.GUID = strings.Repeat("a", 129) },
+		"collection too long":               func(i *Item) { i.Collection = strings.Repeat("a", 65) },
+		"no timestamp":                      func(i *Item) { i.Timestamp = 0 },
+		"delete-before deleted":             func(i *Item) { *i = cut; i.Deleted = true },
+		"delete-before at another guid":     func(i *Item) { *i = cut; i.GUID = NewGUID() },
+		"delete-before of the library's": func(i *Item) {
+			*i = cut
+			i.GUID, i.Public = DeleteBeforeGUID(LibraryCollection), json.RawMessage(`{"collection":"_synckosh","before":5}`)
 		},
-		"delete-before without a cutoff": func(i *Item) { i.Datatype, i.GUID = DeleteBeforeItem, DeleteBeforeItem },
+		"delete-before without a cutoff":     func(i *Item) { *i = cut; i.Public = json.RawMessage(`{"collection":"history"}`) },
+		"delete-before without a collection": func(i *Item) { *i = cut; i.Public = json.RawMessage(`{"before":5}`) },
 	} {
 		it := ok
 		change(&it)

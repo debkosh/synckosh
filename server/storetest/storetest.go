@@ -183,25 +183,23 @@ func cleanup(t *testing.T, st server.Store) {
 }
 
 // removeBefore pins the delete-before rule: every item of the collection at or before the
-// cutoff goes, but the delete-before item itself, and nothing elsewhere.
+// cutoff goes, and nothing elsewhere.
 func removeBefore(t *testing.T, st server.Store) {
 	at := func(collection, guid string, seq uint64, ts int64) synckosh.Item {
 		it := item(collection, guid, seq)
 		it.Timestamp = ts
 		return it
 	}
-	cut := at("history", synckosh.DeleteBeforeItem, 5, 150)
-	cut.Datatype = synckosh.DeleteBeforeItem
 	put(t, st, "a", at("history", "old", 1, 100), at("history", "edge", 2, 200), at("history", "new", 3, 201),
-		at("notes", "other", 4, 100), cut)
+		at("notes", "other", 4, 100))
 	put(t, st, "b", at("history", "old", 1, 100))
 	if err := st.Update("a", func(tx server.Tx) error { return tx.RemoveBefore("history", 200) }); err != nil {
 		t.Fatal(err)
 	}
-	same(t, "after RemoveBefore", since(t, st, "a", "", 0, 100), "history/new@3", "notes/other@4", "history/_deletebefore@5")
-	same(t, "one collection", since(t, st, "a", "history", 0, 100), "history/new@3", "history/_deletebefore@5")
+	same(t, "after RemoveBefore", since(t, st, "a", "", 0, 100), "history/new@3", "notes/other@4")
+	same(t, "one collection", since(t, st, "a", "history", 0, 100), "history/new@3")
 	same(t, "another bucket", since(t, st, "b", "", 0, 100), "history/old@1")
-	if n := last(t, st, "a"); n != 5 {
+	if n := last(t, st, "a"); n != 4 {
 		t.Fatalf("last %d", n)
 	}
 }

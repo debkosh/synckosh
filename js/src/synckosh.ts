@@ -4,8 +4,8 @@
 export { type Item, type WireItem, toWire, fromWire } from './item.js';
 export {
   type Result, type Pushed, type Page, type Limits, DefaultLimits, orDefaults,
-  RefusedTimestampAhead, RefusedTooBig, RefusedInvalid, KeysCollection, SealedKeyDatatype, DeleteBeforeItem,
-  valid, cutoff, validName,
+  RefusedTimestampAhead, RefusedTooBig, RefusedInvalid, LibraryCollection, SealedKeyDatatype, DeleteBeforeDatatype,
+  deleteBeforeGUID, isDeleteBefore, valid, cutoff, validName,
 } from './wire.js';
 export { Clock, MaxAhead } from './clock.js';
 export { newGUID } from './guid.js';

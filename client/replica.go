@@ -152,7 +152,7 @@ func (r *Replica) Put(its ...synckosh.Item) ([]synckosh.Item, error) {
 		switch {
 		case it.GUID == "":
 			bad.add(i, it, errors.New("no guid: every item names one, and a new one takes it from synckosh.NewGUID"))
-		case it.Datatype == synckosh.DeleteBeforeItem:
+		case synckosh.IsDeleteBefore(it):
 			bad.add(i, it, errors.New("a delete-before is written with DeleteBefore"))
 		case old.Locked:
 			bad.add(i, it, ErrLocked)
@@ -237,20 +237,27 @@ func (r *Replica) DeleteBefore(collection string, before time.Time) error {
 	if cutoff > time.Now().Add(synckosh.MaxAhead).UnixMilli() {
 		return fmt.Errorf("delete before %s: more than %s ahead", before, synckosh.MaxAhead)
 	}
-	old, has, err := r.local.Get(collection, synckosh.DeleteBeforeItem)
+	if !synckosh.ValidName(collection) || collection == synckosh.LibraryCollection {
+		return fmt.Errorf("delete before: %q is not an app's collection", collection)
+	}
+	guid := synckosh.DeleteBeforeGUID(collection)
+	old, has, err := r.local.Get(synckosh.LibraryCollection, guid)
 	if err != nil {
 		return err
 	}
 	if old.Locked {
-		return fmt.Errorf("%s %s: %w", collection, synckosh.DeleteBeforeItem, ErrLocked)
+		return fmt.Errorf("%s %s: %w", synckosh.LibraryCollection, guid, ErrLocked)
 	}
-	it := synckosh.Item{Collection: collection, Datatype: synckosh.DeleteBeforeItem, GUID: synckosh.DeleteBeforeItem}
+	it := synckosh.Item{Collection: synckosh.LibraryCollection, Datatype: synckosh.DeleteBeforeDatatype, GUID: guid}
 	if has {
-		held, _ := synckosh.Cutoff(old.Item)
+		_, held, _ := synckosh.Cutoff(old.Item)
 		cutoff = max(cutoff, held)
 		it.Extra = old.Item.Extra
 	}
-	it.Public, _ = json.Marshal(map[string]int64{"before": cutoff})
+	it.Public, _ = json.Marshal(struct {
+		Collection string `json:"collection"`
+		Before     int64  `json:"before"`
+	}{collection, cutoff})
 	if err := r.write(it); err != nil {
 		return err
 	}
@@ -261,7 +268,7 @@ func (r *Replica) DeleteBefore(collection string, before time.Time) error {
 // edit made from now on is after it; and unless the device keeps deleted items, it removes the
 // collection's entries at or before it.
 func (r *Replica) cut(it synckosh.Item) error {
-	cutoff, err := synckosh.Cutoff(it)
+	collection, cutoff, err := synckosh.Cutoff(it)
 	if err != nil {
 		return err
 	}
@@ -270,8 +277,8 @@ func (r *Replica) cut(it synckosh.Item) error {
 		return nil
 	}
 	var gone []string
-	err = r.local.Each(it.Collection, func(e Entry) error {
-		if e.Item.GUID != synckosh.DeleteBeforeItem && e.Item.Timestamp <= cutoff {
+	err = r.local.Each(collection, func(e Entry) error {
+		if e.Item.Timestamp <= cutoff {
 			gone = append(gone, e.Item.GUID)
 		}
 		return nil
@@ -279,16 +286,21 @@ func (r *Replica) cut(it synckosh.Item) error {
 	if err != nil {
 		return err
 	}
-	return r.local.Remove(it.Collection, gone...)
+	return r.local.Remove(collection, gone...)
 }
 
-// cutoff is a collection's delete-before cutoff, 0 if it has none this device can open.
+// cutoff is a collection's delete-before cutoff, 0 if it has none this device can open. The
+// library's own collection has none.
 func (r *Replica) cutoff(collection string) (int64, error) {
-	e, has, err := r.local.Get(collection, synckosh.DeleteBeforeItem)
+	if collection == synckosh.LibraryCollection {
+		return 0, nil
+	}
+	e, has, err := r.local.Get(synckosh.LibraryCollection, synckosh.DeleteBeforeGUID(collection))
 	if err != nil || !has || e.Locked {
 		return 0, err
 	}
-	return synckosh.Cutoff(e.Item)
+	_, cutoff, err := synckosh.Cutoff(e.Item)
+	return cutoff, err
 }
 
 // write stores edits made here, all with one timestamp, so a write of many items doesn't move
@@ -362,7 +374,7 @@ func (r *Replica) Get(collection, guid string) (synckosh.Item, bool, error) {
 		return e.Item, true, fmt.Errorf("%s %s: %w", collection, guid, ErrLocked)
 	}
 	cutoff, err := r.cutoff(collection)
-	if guid != synckosh.DeleteBeforeItem && e.Item.Timestamp <= cutoff {
+	if e.Item.Timestamp <= cutoff {
 		e.Item.Deleted = true
 	}
 	return e.Item, true, err
@@ -380,7 +392,7 @@ func (r *Replica) Items(collection string) ([]synckosh.Item, error) {
 	}
 	var out []synckosh.Item
 	err = r.local.Each(collection, func(e Entry) error {
-		if !e.Locked && !e.Item.Deleted && e.Item.GUID != synckosh.DeleteBeforeItem && e.Item.Timestamp > cutoff {
+		if !e.Locked && !e.Item.Deleted && e.Item.Timestamp > cutoff {
 			out = append(out, e.Item)
 		}
 		return nil
@@ -415,8 +427,10 @@ func (r *Replica) Cleanup(age time.Duration) (int, error) {
 	before := time.Now().Add(-age).UnixMilli()
 	cuts := map[string]int64{} // by collection: the cutoff of a delete-before written before then
 	err := r.local.Each("", func(e Entry) error {
-		if !e.Locked && e.Item.GUID == synckosh.DeleteBeforeItem && e.Item.Timestamp < before {
-			cuts[e.Item.Collection], _ = synckosh.Cutoff(e.Item)
+		if !e.Locked && synckosh.IsDeleteBefore(e.Item) && e.Item.Timestamp < before {
+			if collection, cutoff, err := synckosh.Cutoff(e.Item); err == nil {
+				cuts[collection] = cutoff
+			}
 		}
 		return nil
 	})
@@ -431,7 +445,7 @@ func (r *Replica) Cleanup(age time.Duration) (int, error) {
 		if deletedAt == 0 {
 			deletedAt = it.Timestamp
 		}
-		if !e.Pending && !e.Locked && it.GUID != synckosh.DeleteBeforeItem &&
+		if !e.Pending && !e.Locked && !synckosh.IsDeleteBefore(it) &&
 			(it.Deleted && deletedAt < before || it.Timestamp <= cuts[it.Collection]) {
 			gone[it.Collection] = append(gone[it.Collection], it.GUID)
 			n++
@@ -642,7 +656,7 @@ func (r *Replica) apply(ch changes) error {
 		}
 	}
 	for _, e := range ch.put {
-		if !e.Locked && e.Item.GUID == synckosh.DeleteBeforeItem {
+		if !e.Locked && synckosh.IsDeleteBefore(e.Item) {
 			if err := r.cut(e.Item); err != nil {
 				return err
 			}
@@ -958,12 +972,12 @@ func (r *Replica) fit(server synckosh.Limits) bool {
 func Join(ctx context.Context, c *Client, passphrase string) (*synckosh.DataKey, error) {
 	var after uint64
 	for {
-		p, err := c.Pull(ctx, synckosh.KeysCollection, after, 0)
+		p, err := c.Pull(ctx, synckosh.LibraryCollection, after, 0)
 		if err != nil {
 			return nil, err
 		}
 		for _, it := range p.Items {
-			if it.Deleted || synckosh.Valid(it) != nil {
+			if it.Deleted || it.Datatype != synckosh.SealedKeyDatatype || synckosh.Valid(it) != nil {
 				continue
 			}
 			if key, err := synckosh.OpenSealedCopy(it, passphrase); err == nil {

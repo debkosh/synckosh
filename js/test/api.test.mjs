@@ -3,7 +3,8 @@
 import assert from 'node:assert/strict';
 import {
   newGUID, Clock, MaxAhead, valid, cutoff, validName, DataKey, openSealedCopy,
-  fromWire, toWire, Replica, Client, MemoryLocal, LockedError, PutError, KeysCollection, SealedKeyDatatype,
+  fromWire, toWire, Replica, Client, MemoryLocal, LockedError, PutError, LibraryCollection, SealedKeyDatatype,
+  DeleteBeforeDatatype, deleteBeforeGUID,
 } from '../dist/synckosh.js';
 import { base32, base64, base64URL, unbase64 } from '../dist/encoding.js';
 
@@ -56,15 +57,23 @@ await test('the clock never goes back', () => {
 await test('valid', () => {
   const ok = { collection: 'bookmarks', datatype: 'bookmark', guid: newGUID(), timestamp: 1, deleted: false };
   valid(ok);
-  valid({ collection: 'history', datatype: '_deletebefore', guid: '_deletebefore', timestamp: 1, deleted: false, public: { before: 5 } });
-  // A name that starts with an underscore is the protocol's by convention, and taken all the same.
-  for (const mine of [{ collection: '_x' }, { datatype: '_x' }, { guid: '_x' }]) valid({ ...ok, ...mine });
-  for (const bad of [{ collection: 'Bookmarks' }, { guid: 'a b' }, { guid: '' }, { timestamp: 0 }, { collection: KeysCollection },
-    { datatype: '_deletebefore', guid: '_deletebefore', public: {} }, { datatype: '_deletebefore', guid: '_deletebefore', public: { before: 5 }, deleted: true }]) {
+  const cut = { collection: LibraryCollection, datatype: DeleteBeforeDatatype, guid: deleteBeforeGUID('history'), timestamp: 1,
+    deleted: false, public: { collection: 'history', before: 5 } };
+  valid(cut);
+  assert.deepEqual(cutoff(cut), { collection: 'history', before: 5 });
+  valid({ collection: LibraryCollection, datatype: SealedKeyDatatype, guid: newGUID(), timestamp: 1, deleted: false });
+  // A guid is any text of its characters, an underscore first included; the library's names
+  // mean something only in its own collection.
+  for (const mine of [{ guid: '_x' }, { guid: 'setting:theme' }, { datatype: SealedKeyDatatype }]) valid({ ...ok, ...mine });
+  for (const bad of [{ collection: 'Bookmarks' }, { collection: '_x' }, { datatype: '_x' }, { guid: 'a b' }, { guid: '' },
+    { timestamp: 0 }, { collection: LibraryCollection }]) {
     assert.throws(() => valid({ ...ok, ...bad }), undefined, JSON.stringify(bad));
   }
-  assert.equal(cutoff({ ...ok, public: { before: 7 } }), 7);
-  assert.ok(validName(KeysCollection) && validName('a.b') && validName('_x') && !validName('.x'));
+  for (const bad of [{ deleted: true }, { guid: newGUID() }, { public: { collection: 'history' } }, { public: { before: 5 } },
+    { guid: deleteBeforeGUID(LibraryCollection), public: { collection: LibraryCollection, before: 5 } }]) {
+    assert.throws(() => valid({ ...cut, ...bad }), undefined, JSON.stringify(bad));
+  }
+  assert.ok(validName(LibraryCollection) && validName('a.b') && !validName('_x') && !validName('.x'));
 });
 
 await test('items keep fields they do not know', () => {
@@ -87,7 +96,7 @@ await test('seal binds the item, and the library\'s items carry their public par
   assert.deepEqual(key.open({ ...s, public: { a: 2 } }).public, { a: 2 });
   const sp = key.seal(it, true);
   assert.deepEqual(key.open({ ...sp, public: { a: 2 } }).public, { a: 1 });
-  const lib = key.seal({ ...it, collection: 'h', datatype: '_deletebefore', guid: '_deletebefore', public: { before: 1 } });
+  const lib = key.seal({ ...it, collection: LibraryCollection, datatype: DeleteBeforeDatatype, guid: deleteBeforeGUID('h'), public: { collection: 'h', before: 1 } });
   assert.equal(lib.private.public, true);
   assert.deepEqual(key.open({ ...it, private: { key: key.id, box: key.seal(it).private.box } }), it);
 });
@@ -96,7 +105,7 @@ await test('sealed copies and backup codes', async () => {
   const key = DataKey.create();
   const { code, copy } = await key.backupCode('Backup');
   assert.match(code, /^[A-Z2-7]{4}(-[A-Z2-7]{4}){5}-[A-Z2-7]{2}$/);
-  assert.equal(copy.collection, KeysCollection);
+  assert.equal(copy.collection, LibraryCollection);
   assert.equal(copy.datatype, SealedKeyDatatype);
   const sealed = key.seal({ ...copy, guid: newGUID(), timestamp: 1 });
   const got = await openSealedCopy(sealed, code);
