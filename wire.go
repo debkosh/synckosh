@@ -48,6 +48,9 @@ const (
 	RefusedTooBig = "too-big"
 	// RefusedInvalid: a field is malformed, such as a collection name with capitals.
 	RefusedInvalid = "invalid"
+	// RefusedIdentityTaken: the item is new to the server, and a live item of its collection has
+	// its identity. The result's Current is that item, which the device checks and takes.
+	RefusedIdentityTaken = "identity-taken"
 )
 
 // Limits bound what one request carries. The server and each device set their own; a zero
@@ -96,8 +99,9 @@ const (
 func DeleteBeforeGUID(collection string) string { return "deletebefore:" + collection }
 
 var (
-	nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-	guidRe = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
+	nameRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	guidRe     = regexp.MustCompile(`^[A-Za-z0-9._:~-]{1,128}$`)
+	identityRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Valid checks an item's names and timestamp, and for the library's own items what the protocol
@@ -114,6 +118,8 @@ func Valid(it Item) error {
 		return errors.New("guid: letters, digits and ._:~- up to 128")
 	case it.Timestamp <= 0:
 		return errors.New("timestamp: the time of the edit, in milliseconds")
+	case it.Identity != "" && !identityRe.MatchString(it.Identity):
+		return errors.New("identity: 64 lowercase hex digits, a SHA-256")
 	case !lib:
 		return nil
 	}

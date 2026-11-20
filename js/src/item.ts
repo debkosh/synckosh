@@ -4,7 +4,9 @@
  * Item is one synced thing. `public` is plain: the server and a device that hasn't unlocked can
  * read it. `private` is plain on the device and sealed on the wire. Both are any JSON value, or
  * undefined for none. `base` is the sequence number of the version an edit was made from,
- * absent or 0 for none. `sequence` and `deletedAt` are set by the server. A field the item
+ * absent or 0 for none. `identity` is for the server's index: a hash of what makes two items one
+ * thing, set by the device as it sends an item and never trusted by a device. `sequence` and
+ * `deletedAt` are set by the server. A field the item
  * doesn't have is dropped when it is read.
  */
 export interface Item {
@@ -17,6 +19,7 @@ export interface Item {
   public?: unknown;
   private?: unknown;
   base?: number;
+  identity?: string;
   sequence?: number;
   /** The server's clock, in milliseconds, when it stored the delete. */
   deletedAt?: number;
@@ -39,6 +42,7 @@ export function toWire(it: Item): WireItem {
   if (it.public !== undefined && it.public !== null) m.public = it.public;
   if (it.private !== undefined && it.private !== null) m.private = it.private;
   if (it.base) m.base = it.base;
+  if (it.identity) m.identity = it.identity;
   if (it.sequence) m.sequence = it.sequence;
   if (it.deletedAt) m.deleted_at = it.deletedAt;
   const sorted: WireItem = {};
@@ -72,6 +76,8 @@ export function fromWire(w: unknown): Item {
   const base = field(m, 'base', isUint, 0), sequence = field(m, 'sequence', isUint, 0);
   const deletedAt = field(m, 'deleted_at', isInt, 0);
   if (base) it.base = base;
+  const id = field(m, 'identity', isString, '');
+  if (id) it.identity = id;
   if (sequence) it.sequence = sequence;
   if (deletedAt) it.deletedAt = deletedAt;
   return it;

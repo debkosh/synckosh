@@ -545,7 +545,8 @@ func TestOwnPushDoesNotComeBack(t *testing.T) {
 	mac := e.device("mac")
 	var visits []synckosh.Item
 	for i := 0; i < 1500; i++ {
-		visits = append(visits, synckosh.Item{Collection: "history", Datatype: "visit", GUID: synckosh.NewGUID(), Private: json.RawMessage(`{}`)})
+		visits = append(visits, synckosh.Item{Collection: "history", Datatype: "visit", GUID: synckosh.NewGUID(),
+			Private: json.RawMessage(fmt.Sprintf(`{"n":%d}`, i))})
 	}
 	mac.Put(visits...)
 	put(t, mac, bookmark("root", "Go"))

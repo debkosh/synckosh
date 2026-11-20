@@ -12,8 +12,10 @@ import (
 
 // Item is one synced thing. Public is plain: the server and a device that hasn't unlocked can
 // read it. Private is plain on the device and sealed on the wire. Base is the sequence number of
-// the version an edit was made from, 0 for none. Sequence and DeletedAt are set by the server.
-// A field the item doesn't have is dropped when it is read.
+// the version an edit was made from, 0 for none. Identity is for the server's index: a hash of
+// what makes two items one thing, set by the device as it sends an item and never trusted by a
+// device. Sequence and DeletedAt are set by the server. A field the item doesn't have is dropped
+// when it is read.
 type Item struct {
 	Collection string
 	Datatype   string
@@ -23,6 +25,7 @@ type Item struct {
 	Public     json.RawMessage
 	Private    json.RawMessage
 	Base       uint64 // the sequence number of the version this edit was made from
+	Identity   string // what makes two items one thing, hashed: for the server's index
 	Sequence   uint64 // the server's sequence number for this version
 	DeletedAt  int64  // the server's clock, in milliseconds, when it stored the delete
 }
@@ -47,6 +50,9 @@ func (it Item) MarshalJSON() ([]byte, error) {
 	if it.Base != 0 {
 		set("base", it.Base)
 	}
+	if it.Identity != "" {
+		set("identity", it.Identity)
+	}
 	if it.Sequence != 0 {
 		set("sequence", it.Sequence)
 	}
@@ -63,7 +69,7 @@ func (it *Item) UnmarshalJSON(b []byte) error {
 	}
 	var v Item
 	fields := map[string]any{"collection": &v.Collection, "datatype": &v.Datatype, "guid": &v.GUID, "timestamp": &v.Timestamp,
-		"deleted": &v.Deleted, "base": &v.Base, "sequence": &v.Sequence, "deleted_at": &v.DeletedAt}
+		"deleted": &v.Deleted, "base": &v.Base, "identity": &v.Identity, "sequence": &v.Sequence, "deleted_at": &v.DeletedAt}
 	for k, dst := range fields {
 		if raw, ok := m[k]; ok {
 			if err := json.Unmarshal(raw, dst); err != nil {

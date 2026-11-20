@@ -1,11 +1,13 @@
 import { Clock, MaxAhead } from './clock.js';
 import { Client, TooLargeError } from './client.js';
+import { identity, sameContent as contentIdentity } from './canonical.js';
+import { utf8 } from './encoding.js';
 import { copyItem, json, toWire, type Item } from './item.js';
 import { DataKey, PassphraseError, UnknownKeyError, openSealedCopy, readCopy } from './keys.js';
 import type { Entry, Local } from './local.js';
 import {
   cutoff as cutoffOf, DeleteBeforeDatatype, deleteBeforeGUID, isDeleteBefore, LibraryCollection, orDefaults,
-  RefusedTimestampAhead, SealedKeyDatatype, valid, validName,
+  RefusedIdentityTaken, RefusedTimestampAhead, SealedKeyDatatype, valid, validName,
   type Limits, type Page,
 } from './wire.js';
 
@@ -144,6 +146,14 @@ export interface Config {
   mergers?: Record<string, Merger>;
   /** This device's limits; missing fields take DefaultLimits. */
   limits?: Limits;
+  /**
+   * What makes an item one thing with another: two live items of a collection with the same are
+   * one, so two devices that each made it end with one item. The device hashes it, under a key
+   * made from the data key, into the item's identity, which the server indexes and never reads
+   * more of. Undefined means the item is one thing with no other. Without it, what makes two
+   * items one is holding the same public and private parts, sameContent.
+   */
+  identity?: (it: Item) => Uint8Array | string | undefined;
 }
 
 /**
@@ -217,6 +227,9 @@ export class Replica {
   readonly #sealPublic: Set<string>;
   readonly #keepDeleted: boolean;
   readonly #mergers: Record<string, Merger>;
+  readonly #identityOf?: (it: Item) => Uint8Array | string | undefined;
+  /** During a sync: by collection and identity, this device's items the server can't hold yet. */
+  #fresh?: Map<string, string>;
   #limits: Required<Limits>;
   readonly #clock = new Clock();
   #queue: Promise<unknown> = Promise.resolve();
@@ -228,6 +241,7 @@ export class Replica {
     this.#sealPublic = new Set(cfg.sealPublic ?? []);
     this.#keepDeleted = cfg.keepDeleted ?? false;
     this.#mergers = cfg.mergers ?? {};
+    this.#identityOf = cfg.identity;
     this.#limits = orDefaults(cfg.limits);
   }
 
@@ -253,9 +267,36 @@ export class Replica {
     await this.#local.setMeta('clock', JSON.stringify(this.#clock.last()));
   }
 
-  /** An item as it goes to the server. */
+  /** An item's identity, or none for a deleted one or one of the library's. */
+  #identity(it: Item): string {
+    if (it.deleted || it.collection === LibraryCollection) return '';
+    const what = (this.#identityOf ?? contentIdentity)(it);
+    if (what === undefined) return '';
+    return identity(this.#key, typeof what === 'string' ? utf8(what) : what);
+  }
+
+  /**
+   * Whether the server's holder of an identity is one thing with an item of this device's: it
+   * opens, it is live, and its own content gives the same identity. The identity the server says
+   * it has is not trusted.
+   */
+  #sameThing(holder: Item, mine: Item): boolean {
+    try {
+      valid(holder);
+      const opened = this.#open(holder);
+      if (opened.deleted || opened.collection !== mine.collection || opened.guid === mine.guid) return false;
+      const id = this.#identity(mine);
+      return id !== '' && this.#identity(opened) === id;
+    } catch {
+      return false;
+    }
+  }
+
+  /** An item as it goes to the server, with its identity. */
   #seal(it: Item): Item {
-    return this.#key ? this.#key.seal(it, this.#sealPublic.has(it.datatype)) : it;
+    const id = this.#identity(it);
+    const out = id ? { ...it, identity: id } : (({ identity, ...rest }) => rest)(it);
+    return this.#key ? this.#key.seal(out, this.#sealPublic.has(it.datatype)) : out;
   }
 
   /** An item from the server as this device keeps it: throws UnknownKeyError for another key's, and otherwise for one changed or forged. */
@@ -545,6 +586,7 @@ export class Replica {
     return this.#run(async () => {
       for (let round = 0; round < maxRounds; round++) {
         const rp = new Report();
+        await this.#findFresh();
         const again = await this.#pull(rp, signal);
         const restart = await this.#push(rp, signal);
         await this.#saveClock();
@@ -555,7 +597,24 @@ export class Replica {
         }
       }
       throw new Error(`sync: not settled after ${maxRounds} rounds`);
+    }).finally(() => {
+      this.#fresh = undefined;
     });
+  }
+
+  /**
+   * Notes, by collection and identity, this device's items the server can't hold yet: pending,
+   * never stored and never sent. One the pull brings under another guid is the same thing, made
+   * on two devices, and this device takes the server's.
+   */
+  async #findFresh() {
+    this.#fresh = undefined;
+    for (const e of await this.#local.pending()) {
+      const it = e.item;
+      if (e.locked || it.deleted || it.base || it.sequence || e.sent) continue;
+      const id = this.#identity(it);
+      if (id) (this.#fresh ??= new Map()).set(it.collection + '\0' + id, it.guid);
+    }
   }
 
   /**
@@ -710,6 +769,16 @@ export class Replica {
     }
     const got = opened!;
     this.#clock.observe(got.timestamp);
+    if (!e && this.#fresh && !got.deleted) {
+      const k = got.collection + '\0' + this.#identity(got);
+      const mine = this.#fresh.get(k);
+      if (mine !== undefined && mine !== got.guid) {
+        // The same thing as an item made here and not yet sent: the server's wins, and this
+        // device's, never stored anywhere, goes.
+        this.#fresh.delete(k);
+        ch.remove({ ...got, guid: mine });
+      }
+    }
     if (!e || e.locked) {
       this.#keep(ch, { item: got });
       return;
@@ -798,6 +867,17 @@ export class Replica {
           if (!rs.sequence) continue;
           if (lo === 0 || rs.sequence < lo) lo = rs.sequence;
           hi = Math.max(hi, rs.sequence);
+        } else if (rs.code === RefusedIdentityTaken && rs.current) {
+          // The server holds this thing already, under another guid: this device takes the
+          // server's and drops its own, which was never stored anywhere.
+          const mine = batch[i].item;
+          if (!this.#sameThing(rs.current, mine)) {
+            rp.refused.push({ collection: mine.collection, guid: mine.guid, code: rs.code,
+              error: "the server named as holder an item that isn't the same thing" });
+            continue;
+          }
+          await this.#take(rs.current, rp, ch);
+          ch.remove(mine);
         } else if (rs.current) {
           // The server holds a later version: it wins, here too.
           await this.#take(rs.current, rp, ch);

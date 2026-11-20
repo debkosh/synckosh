@@ -4,10 +4,11 @@
 export { type Item, type WireItem, toWire, fromWire } from './item.js';
 export {
   type Result, type Pushed, type Page, type Limits, DefaultLimits, orDefaults,
-  RefusedTimestampAhead, RefusedTooBig, RefusedInvalid, LibraryCollection, SealedKeyDatatype, DeleteBeforeDatatype,
+  RefusedTimestampAhead, RefusedTooBig, RefusedInvalid, RefusedIdentityTaken, LibraryCollection, SealedKeyDatatype, DeleteBeforeDatatype,
   deleteBeforeGUID, isDeleteBefore, valid, cutoff, validName, type Filter,
 } from './wire.js';
 export { Clock, MaxAhead } from './clock.js';
+export { canonical, sameContent, identity } from './canonical.js';
 export { newGUID } from './guid.js';
 export { DataKey, openSealedCopy, readCopy, type CopyInfo, PassphraseError, UnknownKeyError, NotSealedError } from './keys.js';
 export { Client, type ClientOptions, TooLargeError, ServerError } from './client.js';

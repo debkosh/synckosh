@@ -6,15 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sudiptadeb/synckosh"
 	"github.com/sudiptadeb/synckosh/client"
 )
 
+// notes counts the notes made, so each holds its own text: two that hold the same are one thing.
+var notes atomic.Int64
+
 func note(size int) synckosh.Item {
 	return synckosh.Item{Collection: "notes", Datatype: "note",
-		Private: json.RawMessage(fmt.Sprintf(`{"text":%q}`, strings.Repeat("x", size)))}
+		Private: json.RawMessage(fmt.Sprintf(`{"n":%d,"text":%q}`, notes.Add(1), strings.Repeat("x", size)))}
 }
 
 func putMany(t *testing.T, d *device, n, size int) {

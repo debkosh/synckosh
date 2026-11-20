@@ -69,7 +69,14 @@ type Config struct {
 	KeepDeleted bool
 	// Mergers join concurrent versions, by datatype. A datatype with none keeps the newest.
 	Mergers map[string]Merger
-	Limits  synckosh.Limits // this device's; zero fields take synckosh.DefaultLimits
+	// Identity returns what makes an item one thing with another: two live items of a
+	// collection with the same are one, so two devices that each made it end with one item.
+	// The device hashes it, under a key made from the data key, into the item's identity, which
+	// the server indexes and never reads more of. nil means the item is one thing with no
+	// other. Without Identity, what makes two items one is holding the same public and private
+	// parts, synckosh.SameContent.
+	Identity func(synckosh.Item) []byte
+	Limits   synckosh.Limits // this device's; zero fields take synckosh.DefaultLimits
 }
 
 // Replica is one device's copy of a bucket. Its methods may be called from any goroutine,
@@ -82,6 +89,8 @@ type Replica struct {
 	sealPublic  map[string]bool
 	keepDeleted bool
 	mergers     map[string]Merger
+	identityOf  func(synckosh.Item) []byte
+	fresh       map[string]string // during a Sync: by collection and identity, this device's items the server can't hold yet
 	limits      synckosh.Limits
 	clock       *synckosh.Clock
 }
@@ -89,7 +98,7 @@ type Replica struct {
 // Open opens a device's replica, with its clock where it left off.
 func Open(cfg Config) (*Replica, error) {
 	r := &Replica{c: cfg.Client, local: cfg.Local, key: cfg.Key, sealPublic: cfg.SealPublic,
-		keepDeleted: cfg.KeepDeleted, mergers: cfg.Mergers, limits: cfg.Limits.OrDefaults(), clock: synckosh.NewClock()}
+		keepDeleted: cfg.KeepDeleted, mergers: cfg.Mergers, identityOf: cfg.Identity, limits: cfg.Limits.OrDefaults(), clock: synckosh.NewClock()}
 	b, err := r.local.Meta("clock")
 	if err != nil {
 		return nil, err
@@ -109,8 +118,40 @@ func (r *Replica) saveClock() error {
 	return r.local.SetMeta("clock", b)
 }
 
-// seal is an item as it goes to the server.
+// identity is an item's identity, or none for a deleted one or one of the library's.
+func (r *Replica) identity(it synckosh.Item) string {
+	if it.Deleted || it.Collection == synckosh.LibraryCollection {
+		return ""
+	}
+	of := r.identityOf
+	if of == nil {
+		of = synckosh.SameContent
+	}
+	what := of(it)
+	if what == nil {
+		return ""
+	}
+	return synckosh.Identity(r.key, what)
+}
+
+// sameThing says whether the server's holder of an identity is one thing with an item of this
+// device's: it opens, it is live, and its own content gives the same identity. The identity the
+// server says it has is not trusted.
+func (r *Replica) sameThing(holder, mine synckosh.Item) bool {
+	if synckosh.Valid(holder) != nil {
+		return false
+	}
+	opened, err := r.open(holder)
+	if err != nil || opened.Deleted || opened.Collection != mine.Collection || opened.GUID == mine.GUID {
+		return false
+	}
+	id := r.identity(mine)
+	return id != "" && r.identity(opened) == id
+}
+
+// seal is an item as it goes to the server, with its identity.
 func (r *Replica) seal(it synckosh.Item) (synckosh.Item, error) {
+	it.Identity = r.identity(it)
 	if r.key == nil {
 		return it, nil
 	}
@@ -539,8 +580,12 @@ func (rp *report) err() error {
 func (r *Replica) Sync(ctx context.Context) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer func() { r.fresh = nil }()
 	for round := 0; round < maxRounds; round++ {
 		rp := &report{}
+		if err := r.findFresh(); err != nil {
+			return err
+		}
 		again, err := r.pull(ctx, rp)
 		if err != nil {
 			return err
@@ -564,6 +609,30 @@ func (r *Replica) Sync(ctx context.Context) error {
 // pushes nothing and keeps its old store id, so every Sync answers the same, until the app sets
 // sync up again on this device: a new replica, which joins with a passphrase or creates a key.
 var ErrBucketReset = errors.New("the bucket was reset: set sync up again on this device")
+
+// findFresh notes, by collection and identity, this device's items that the server can't hold
+// yet: pending, never stored and never sent. One the pull brings under another guid is the
+// same thing, made on two devices, and this device takes the server's.
+func (r *Replica) findFresh() error {
+	r.fresh = nil
+	pending, err := r.local.Pending()
+	if err != nil {
+		return err
+	}
+	for _, e := range pending {
+		it := e.Item
+		if e.Locked || it.Deleted || it.Base != 0 || it.Sequence != 0 || e.Sent != 0 {
+			continue
+		}
+		if id := r.identity(it); id != "" {
+			if r.fresh == nil {
+				r.fresh = map[string]string{}
+			}
+			r.fresh[it.Collection+"\x00"+id] = it.GUID
+		}
+	}
+	return nil
+}
 
 // checkStore compares the server's store id with the one this device last synced with. On a
 // new one, the server may have lost data. If the bucket still holds a sealed copy of this
@@ -824,6 +893,15 @@ func (r *Replica) take(remote synckosh.Item, rp *report, ch *changes) error {
 		return nil
 	}
 	r.clock.Observe(opened.Timestamp)
+	if !has && r.fresh != nil && !opened.Deleted {
+		k := opened.Collection + "\x00" + r.identity(opened)
+		if mine, ok := r.fresh[k]; ok && mine != opened.GUID {
+			// The same thing as an item made here and not yet sent: the server's wins, and
+			// this device's, never stored anywhere, goes.
+			delete(r.fresh, k)
+			ch.remove(synckosh.Item{Collection: opened.Collection, GUID: mine})
+		}
+	}
 	if !has || e.Locked {
 		r.keep(ch, Entry{Item: opened})
 		return nil
@@ -957,6 +1035,19 @@ func (r *Replica) push(ctx context.Context, rp *report) (restart bool, err error
 					lo = rs.Sequence
 				}
 				hi = max(hi, rs.Sequence)
+			case rs.Code == synckosh.RefusedIdentityTaken && rs.Current != nil:
+				// The server holds this thing already, under another guid: this device takes the
+				// server's and drops its own, which was never stored anywhere.
+				mine := batch[i].Item
+				if !r.sameThing(*rs.Current, mine) {
+					rp.refused.Items = append(rp.refused.Items, Refused{mine.Collection, mine.GUID, rs.Code,
+						"the server named as holder an item that isn't the same thing"})
+					continue
+				}
+				if err := r.take(*rs.Current, rp, &ch); err != nil {
+					return false, err
+				}
+				ch.remove(mine)
 			case rs.Current != nil:
 				// The server holds a later version: it wins, here too.
 				if err := r.take(*rs.Current, rp, &ch); err != nil {

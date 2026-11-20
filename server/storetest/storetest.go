@@ -5,6 +5,7 @@ package storetest
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -23,6 +24,7 @@ func Run(t *testing.T, open func(t *testing.T) server.Store) {
 		{"FailedUpdateStoresNothing", failedUpdate},
 		{"Cleanup", cleanup},
 		{"RemoveBefore", removeBefore},
+		{"Identity", identity},
 	} {
 		t.Run(c.name, func(t *testing.T) { c.fn(t, open(t)) })
 	}
@@ -221,5 +223,57 @@ func removeBefore(t *testing.T, st server.Store) {
 	same(t, "another bucket", since(t, st, "b", "", 0, 100), "history/old@1")
 	if n := last(t, st, "a"); n != 4 {
 		t.Fatalf("last %d", n)
+	}
+}
+
+// identity pins the identity index: a live item of the collection with that identity, never a
+// deleted or removed one, and none from another collection or bucket.
+func identity(t *testing.T, st server.Store) {
+	find := func(bucket, collection, id string) string {
+		t.Helper()
+		var got string
+		err := st.Update(bucket, func(tx server.Tx) error {
+			it, has, err := tx.Identity(collection, id)
+			if has {
+				got = it.GUID
+			}
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	with := func(guid, id string, seq uint64) synckosh.Item {
+		it := item("notes", guid, seq)
+		it.Identity = id
+		return it
+	}
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	put(t, st, "x", with("n1", a, 1), with("n2", b, 2))
+	if got := find("x", "notes", a); got != "n1" {
+		t.Fatalf("identity a: %q, want n1", got)
+	}
+	if find("x", "tasks", a) != "" || find("y", "notes", a) != "" {
+		t.Fatal("found in another collection or bucket")
+	}
+	put(t, st, "x", with("n1", b, 3)) // an edit with another identity
+	if got := find("x", "notes", a); got != "" {
+		t.Fatalf("identity a after n1 changed: %q", got)
+	}
+	if got := find("x", "notes", b); got != "n1" && got != "n2" {
+		t.Fatalf("identity b: %q", got)
+	}
+	gone := with("n2", b, 4)
+	gone.Deleted, gone.DeletedAt = true, 100
+	put(t, st, "x", gone)
+	if got := find("x", "notes", b); got != "n1" {
+		t.Fatalf("identity b with n2 deleted: %q, want n1", got)
+	}
+	if err := st.Update("x", func(tx server.Tx) error { return tx.RemoveBefore("notes", 3) }); err != nil {
+		t.Fatal(err)
+	}
+	if got := find("x", "notes", b); got != "" {
+		t.Fatalf("identity b after RemoveBefore: %q", got)
 	}
 }

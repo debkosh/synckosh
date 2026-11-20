@@ -127,5 +127,62 @@
       "timestamp": 1763380800003
     },
     "passphrase": "correct horse battery staple"
-  }
+  },
+  "identities": [
+    {
+      "canonical": "[{\"a\":[1,2.5,\"x\"],\"b\":1},{\"title\":\"é \\\"q\\\" \\n\\u0001<&>\",\"url\":\"https://go.dev/\"}]",
+      "identity": "796e8bea77ed3b6c0cdba46b4db6c5c32461e3eaf17432c663a63ffac06caf4f",
+      "identity_without_key": "3672381ecf335587cb768e699f85b37979b022a1bb656a02ea444f3597973a1b",
+      "private": {
+        "title": "é \"q\" \n\u0001<&>",
+        "url": "https://go.dev/"
+      },
+      "public": {
+        "b": 1,
+        "a": [
+          1,
+          2.5,
+          "x"
+        ]
+      }
+    },
+    {
+      "canonical": "[[1e+21,1e-7,123456789012345680000,0.1,0,1,100,5e-324,-1.5e+300,0.000001],null]",
+      "identity": "1e9c2f8680d91ce147fcd1cc2f6f5de47d2ebde63b200e48d1d5dcb225e9f864",
+      "identity_without_key": "ffe141c289005afcff320b13442ad1f379176d1e67828dd52d105cc46a9687d4",
+      "public": [
+        1e+21,
+        1e-07,
+        123456789012345680000,
+        0.1,
+        0,
+        1.0,
+        100,
+        5e-324,
+        -1.5e+300,
+        1e-06
+      ]
+    },
+    {
+      "canonical": "[null,{\"\":{\"x\":true,\"y\":null},\"a\":3,\"z\":2,\"é\":1,\"😀\":4,\"דּ\":5}]",
+      "identity": "35133d6dba1e4b158bb5273016d2173fc3cc68962a1fea98a85aee61fcf8dc2e",
+      "identity_without_key": "1c4413cac482fd211df9cff6ee77f727fd0c4dd6e4fb02e54823b2b683f91e9e",
+      "private": {
+        "é": 1,
+        "z": 2,
+        "a": 3,
+        "😀": 4,
+        "דּ": 5,
+        "": {
+          "y": null,
+          "x": true
+        }
+      }
+    },
+    {
+      "canonical": "[null,null]",
+      "identity": "cdf7a672ec01e98698e139c2c2f358e19a805d0ef05bc1c25f323a3687d69462",
+      "identity_without_key": "95cb9b4f84ceff132cc7a875d8c192bf4997016a939ee64141c1fd628c0e8738"
+    }
+  ]
 }

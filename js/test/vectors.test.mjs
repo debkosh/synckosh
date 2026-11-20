@@ -1,10 +1,10 @@
 // Every vector in ../testdata/vectors.json, checked as the Go package's vectors_test.go checks
 // it: the additional data, the box made again from what it opens to with its own nonce, the item
-// opened, and the sealed copy opened with its passphrase.
+// opened, the sealed copy opened with its passphrase, and items' canonical JSON and identity.
 import { readFileSync } from 'node:fs';
-import { DataKey, fromWire, openSealedCopy } from '../dist/synckosh.js';
+import { DataKey, fromWire, openSealedCopy, sameContent, identity } from '../dist/synckosh.js';
 import { additional, sealWith } from '../dist/keys.js';
-import { unbase64, utf8 } from '../dist/encoding.js';
+import { unbase64, unutf8, utf8 } from '../dist/encoding.js';
 
 const v = JSON.parse(readFileSync(new URL('../../testdata/vectors.json', import.meta.url), 'utf8'));
 const key = DataKey.from(v.data_key.id, unbase64(v.data_key.key));
@@ -49,8 +49,16 @@ try {
   if (e.name !== 'PassphraseError') fail('wrong passphrase: ' + e.message);
 }
 
+for (const c of v.identities) {
+  n++;
+  const can = sameContent({ public: c.public, private: c.private });
+  if (unutf8(can) !== c.canonical) fail(`canonical ${unutf8(can)}, want ${c.canonical}`);
+  if (identity(key, can) !== c.identity) fail(`${c.canonical}: identity ${identity(key, can)}`);
+  if (identity(undefined, can) !== c.identity_without_key) fail(`${c.canonical}: identity without a key ${identity(undefined, can)}`);
+}
+
 if (bad) {
   console.error(`vectors: ${bad} checks of ${n} vectors differ`);
   process.exit(1);
 }
-console.log(`vectors: all ${n} vectors match (${v.items.length} sealed items and the sealed copy)`);
+console.log(`vectors: all ${n} vectors match (${v.items.length} sealed items, the sealed copy and ${v.identities.length} identities)`);

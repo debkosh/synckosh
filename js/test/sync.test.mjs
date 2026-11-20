@@ -209,6 +209,29 @@ await test('items under another key are locked, forged ones rejected', async () 
   assert.equal((await a.locked('todos')).length, 1);
 });
 
+await test('the same thing made on two devices, TypeScript and Go, is one item', async () => {
+  const token = bucket();
+  const key = await create(new Client({ url, token }), passphrase, 'Main');
+  const a = await device(token, key), b = await device(token, key);
+  const [milk] = await a.put({ guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'milk', n: [1, 2.5] } });
+  await b.put({ guid: newGUID(), collection: 'todos', datatype: 'todo', private: { n: [1, 2.5], text: 'milk' } });
+  await b.put({ guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'eggs' } });
+  await a.sync();
+  await b.sync(); // b finds a's milk in its pull, and drops its own
+  await a.sync();
+  for (const r of [a, b]) assert.deepEqual(await texts(r, 'todos'), ['eggs', 'milk']);
+  assert.equal((await b.items('todos')).find((it) => it.private.text === 'milk').guid, milk.guid);
+  // A Go device that pulled before it made the same thing has it refused as identity-taken,
+  // and takes the server's: its canonical JSON and identity are the TypeScript device's.
+  const out = execFileSync(path(bin, 'device'), ['sync', url, token, passphrase], {
+    input: JSON.stringify([{ guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'eggs', } }]),
+  });
+  const seen = JSON.parse(out.toString());
+  assert.deepEqual(seen.map((it) => it.private.text).sort(), ['eggs', 'milk']);
+  await a.sync();
+  assert.deepEqual(await texts(a, 'todos'), ['eggs', 'milk']);
+});
+
 await test('a Go device reads what a TypeScript device wrote, and writes back', async () => {
   const token = bucket();
   const key = await create(new Client({ url, token }), passphrase, 'Main');

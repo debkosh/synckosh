@@ -45,6 +45,8 @@ type Tx interface {
 	// highest one stored: it never goes back, even when cleanup removes the item that had it.
 	Last() (uint64, error)
 	Get(collection, guid string) (synckosh.Item, bool, error)
+	// Identity returns a live item of the collection whose Identity is identity, if any.
+	Identity(collection, identity string) (synckosh.Item, bool, error)
 	// Put stores items, each replacing its guid's version. Last becomes the highest stored.
 	Put(items []synckosh.Item) error
 	// RemoveBefore removes every item of a collection with a timestamp at or before before.
@@ -243,6 +245,23 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 		}
 		return tx.Get(collection, guid)
 	}
+	// identity finds the live item of a collection that holds an identity, this push's included.
+	identity := func(collection, id string) (synckosh.Item, bool, error) {
+		for j := len(out) - 1; j >= 0; j-- {
+			if o := out[j]; o.Collection == collection && o.Identity == id && !o.Deleted {
+				return o, true, nil
+			}
+		}
+		h, has, err := tx.Identity(collection, id)
+		if err != nil || !has {
+			return h, has, err
+		}
+		if j, ok := batch[key{h.Collection, h.GUID}]; ok { // changed in this push
+			h = out[j]
+			return h, !h.Deleted && h.Identity == id, nil
+		}
+		return h, true, nil
+	}
 	cutoffs := map[string]int64{} // by collection, 0 for none
 	cutoff := func(collection string) (int64, error) {
 		if c, ok := cutoffs[collection]; ok {
@@ -282,6 +301,17 @@ func store(tx Tx, in []synckosh.Item, errs []*synckosh.Result, now int64) ([]syn
 			c := cur
 			res[i] = synckosh.Result{Current: &c}
 			continue
+		}
+		if !has && !it.Deleted && it.Identity != "" {
+			holder, taken, err := identity(it.Collection, it.Identity)
+			if err != nil {
+				return nil, err
+			}
+			if taken {
+				res[i] = synckosh.Result{Code: synckosh.RefusedIdentityTaken, Current: &holder,
+					Error: "a live item of the collection has this identity: current is that item"}
+				continue
+			}
 		}
 		// Newer, or made in the same millisecond: the later push wins. A retry of an edit
 		// already here is stored again, which is the same edit with a new sequence number.

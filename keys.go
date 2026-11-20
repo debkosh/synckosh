@@ -2,10 +2,13 @@ package synckosh
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -332,4 +335,38 @@ func OpenSealedCopy(it Item, passphrase string) (*DataKey, error) {
 		return nil, fmt.Errorf("sealed key: not sealed by its own key: %w", err)
 	}
 	return key, nil
+}
+
+// Identity hashes what makes two items one thing into an item's identity, for the server's
+// index: HMAC-SHA256 under a key made from the data key, so the server learns only that two items
+// match, never what they are. A bucket without a key is plain to the server, and there it is
+// SHA-256.
+func Identity(key *DataKey, what []byte) string {
+	if key == nil {
+		sum := sha256.Sum256(what)
+		return hex.EncodeToString(sum[:])
+	}
+	sub := hmac.New(sha256.New, key.key[:])
+	sub.Write([]byte("synckosh identity"))
+	h := hmac.New(sha256.New, sub.Sum(nil))
+	h.Write(what)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// SameContent is the identity an item has unless its app says otherwise: its public and private
+// parts, in canonical JSON, as the array [public, private], null for a part it lacks. Two items
+// that hold the same are one thing.
+func SameContent(it Item) []byte {
+	pub, priv := it.Public, it.Private
+	if len(pub) == 0 {
+		pub = json.RawMessage("null")
+	}
+	if len(priv) == 0 {
+		priv = json.RawMessage("null")
+	}
+	b, err := Canonical(bytes.Join([][]byte{[]byte("["), pub, []byte(","), priv, []byte("]")}, nil))
+	if err != nil {
+		return nil
+	}
+	return b
 }

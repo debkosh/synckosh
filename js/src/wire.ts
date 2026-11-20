@@ -42,6 +42,11 @@ export const RefusedTimestampAhead = 'timestamp-ahead';
 export const RefusedTooBig = 'too-big';
 /** A field is malformed, such as a collection name with capitals. */
 export const RefusedInvalid = 'invalid';
+/**
+ * The item is new to the server, and a live item of its collection has its identity. The result's
+ * `current` is that item, which the device checks and takes.
+ */
+export const RefusedIdentityTaken = 'identity-taken';
 
 /**
  * Limits bound what one request carries. The server and each device set their own; a missing or
@@ -92,6 +97,7 @@ export function deleteBeforeGUID(collection: string): string {
 
 const nameRe = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const guidRe = /^[A-Za-z0-9._:~-]{1,128}$/;
+const identityRe = /^[0-9a-f]{64}$/;
 
 /**
  * valid checks an item's names and timestamp, and for the library's own items what the protocol
@@ -108,6 +114,8 @@ export function valid(it: Item): void {
     throw new Error('guid: letters, digits and ._:~- up to 128');
   } else if (!(it.timestamp > 0)) {
     throw new Error('timestamp: the time of the edit, in milliseconds');
+  } else if (it.identity && !identityRe.test(it.identity)) {
+    throw new Error('identity: 64 lowercase hex digits, a SHA-256');
   }
   if (!lib || it.datatype === SealedKeyDatatype) return;
   if (it.datatype !== DeleteBeforeDatatype) {

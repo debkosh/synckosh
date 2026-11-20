@@ -164,6 +164,26 @@ func (t *storeTx) Get(collection, guid string) (synckosh.Item, bool, error) {
 	return it, true, json.Unmarshal(v, &it)
 }
 
+// Identity reads the collection's index of live items by identity.
+func (t *storeTx) Identity(collection, identity string) (synckosh.Item, bool, error) {
+	b, _ := sub(t.tx, false, "b", t.bucket, "c", collection, "identity")
+	if b == nil || identity == "" {
+		return synckosh.Item{}, false, nil
+	}
+	prefix := []byte(identity + "\x00")
+	k, _ := b.Cursor().Seek(prefix)
+	if k == nil || !bytes.HasPrefix(k, prefix) {
+		return synckosh.Item{}, false, nil
+	}
+	return t.Get(collection, string(k[len(prefix):]))
+}
+
+// byIdentity is how a collection's identity index names a live item: its identity and guid.
+func byIdentity(it synckosh.Item) []byte { return []byte(it.Identity + "\x00" + it.GUID) }
+
+// indexed says whether an item is in its collection's identity index.
+func indexed(it synckosh.Item) bool { return it.Identity != "" && !it.Deleted }
+
 // ref is how the bucket-wide index names an item: its collection and guid.
 func ref(collection, guid string) []byte { return []byte(collection + "\x00" + guid) }
 
@@ -189,6 +209,10 @@ func (t *storeTx) Put(items []synckosh.Item) error {
 		if err != nil {
 			return err
 		}
+		ids, err := bk.CreateBucketIfNotExists([]byte("identity"))
+		if err != nil {
+			return err
+		}
 		if old := byGUID.Get([]byte(it.GUID)); old != nil {
 			var o synckosh.Item
 			if err := json.Unmarshal(old, &o); err != nil {
@@ -198,6 +222,16 @@ func (t *storeTx) Put(items []synckosh.Item) error {
 				return err
 			}
 			if err := all.Delete(u64(o.Sequence)); err != nil {
+				return err
+			}
+			if indexed(o) {
+				if err := ids.Delete(byIdentity(o)); err != nil {
+					return err
+				}
+			}
+		}
+		if indexed(it) {
+			if err := ids.Put(byIdentity(it), nil); err != nil {
 				return err
 			}
 		}
@@ -237,29 +271,40 @@ func remove(all, collection *bbolt.Bucket, gone func(synckosh.Item) bool) (int, 
 	if byGUID == nil {
 		return 0, nil
 	}
-	var rm [][2][]byte
+	type removal struct{ guid, seq, identity []byte }
+	var rm []removal
 	err := byGUID.ForEach(func(guid, v []byte) error {
 		var it synckosh.Item
 		if err := json.Unmarshal(v, &it); err != nil {
 			return err
 		}
 		if gone(it) {
-			rm = append(rm, [2][]byte{bytes.Clone(guid), u64(it.Sequence)})
+			r := removal{guid: bytes.Clone(guid), seq: u64(it.Sequence)}
+			if indexed(it) {
+				r.identity = byIdentity(it)
+			}
+			rm = append(rm, r)
 		}
 		return nil
 	})
 	if err != nil {
 		return 0, err
 	}
+	ids := collection.Bucket([]byte("identity"))
 	for _, g := range rm {
-		if err := byGUID.Delete(g[0]); err != nil {
+		if err := byGUID.Delete(g.guid); err != nil {
 			return 0, err
 		}
-		if err := bySeq.Delete(g[1]); err != nil {
+		if err := bySeq.Delete(g.seq); err != nil {
 			return 0, err
 		}
-		if err := all.Delete(g[1]); err != nil {
+		if err := all.Delete(g.seq); err != nil {
 			return 0, err
+		}
+		if g.identity != nil && ids != nil {
+			if err := ids.Delete(g.identity); err != nil {
+				return 0, err
+			}
 		}
 	}
 	return len(rm), nil

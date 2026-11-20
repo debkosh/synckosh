@@ -9,8 +9,8 @@ import (
 )
 
 // testdata/vectors.json pins the wire for other implementations: a data key, items with the
-// additional data their seal binds, what each box opens to, and a sealed copy of the key with
-// its passphrase.
+// additional data their seal binds, what each box opens to, a sealed copy of the key with its
+// passphrase, and items' public and private parts with their canonical JSON and identity.
 type vectors struct {
 	DataKey struct {
 		ID  string `json:"id"`
@@ -27,6 +27,13 @@ type vectors struct {
 		Passphrase string `json:"passphrase"`
 		Item       Item   `json:"item"`
 	} `json:"sealed_copy"`
+	Identities []struct {
+		Public     json.RawMessage `json:"public"`
+		Private    json.RawMessage `json:"private"`
+		Canonical  string          `json:"canonical"`
+		Identity   string          `json:"identity"`
+		WithoutKey string          `json:"identity_without_key"`
+	} `json:"identities"`
 }
 
 func compact(t *testing.T, raw json.RawMessage) string {
@@ -84,5 +91,20 @@ func TestVectors(t *testing.T) {
 	got, err := OpenSealedCopy(v.SealedCopy.Item, v.SealedCopy.Passphrase)
 	if err != nil || got.ID != key.ID || !bytes.Equal(got.Bytes(), key.Bytes()) {
 		t.Fatalf("the sealed copy: %v", err)
+	}
+	if len(v.Identities) == 0 {
+		t.Fatal("no identities")
+	}
+	for _, c := range v.Identities {
+		can := SameContent(Item{Public: c.Public, Private: c.Private})
+		if string(can) != c.Canonical {
+			t.Errorf("canonical %s, want %s", can, c.Canonical)
+		}
+		if id := Identity(key, can); id != c.Identity {
+			t.Errorf("%s: identity %s, want %s", c.Canonical, id, c.Identity)
+		}
+		if id := Identity(nil, can); id != c.WithoutKey {
+			t.Errorf("%s: identity without a key %s, want %s", c.Canonical, id, c.WithoutKey)
+		}
 	}
 }

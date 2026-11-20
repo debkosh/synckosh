@@ -2,7 +2,7 @@
 
 How devices sync a bucket's data through a synckosh server. The Go packages in this repo are
 the reference: `client` for a device, `server` for the server, `bolt` for storage on both.
-[testdata/vectors.json](testdata/vectors.json) holds test vectors for the sealing.
+[testdata/vectors.json](testdata/vectors.json) holds test vectors for the sealing and for identities.
 
 ## The model
 
@@ -53,6 +53,7 @@ Three levels name where an item lives:
 | `public` | device | plain JSON, readable by the server and by a device that hasn't unlocked yet. |
 | `private` | device | JSON sealed with the bucket's data key, below. |
 | `base` | device | the `sequence` of the version this edit was made from; absent for a new item. |
+| `identity` | device | for the server's index, below: 64 lowercase hex digits, a hash of what makes the item one thing with another; absent for none. It is outside the seal, and no device trusts it. |
 | `sequence` | server | the server's sequence number for this version: the order it was stored in, from the bucket's own counter, which only goes up. |
 | `deleted_at` | server | the server's clock, in milliseconds, when it first stored the item deleted. |
 
@@ -141,6 +142,34 @@ whatever it chooses:
   app decides how to show it.
 - **Order is a field too.** How a list is ordered is the app's, like any other data: an order
   key in an item, or a separate item that holds the order, which syncs as any edit does.
+
+### One thing on two devices
+
+Two devices can each make the same thing before they sync: the same login imported on both, the
+same address visited. Each gives it its own guid, and the identity makes them one item.
+
+- **The device** gives each live item it sends an identity: HMAC-SHA256 of what makes it one
+  thing, under the identity key, which is HMAC-SHA256 of the text `synckosh identity` under the
+  data key, so the server learns which items are one thing and nothing of what they are. Without a
+  data key it is SHA-256. What makes an item one thing is the app's to say, such as an address,
+  or a site and a username; unless it says, it is the item's parts as RFC 8785 canonical JSON of
+  `[public, private]`, `null` for a part it lacks, so two items that hold the same are one. An app
+  may also say an item is one with no other. Deleted items and the library's own have none.
+- **The server** keeps an index of its live items by collection and identity. A pushed item that
+  is live, has an identity, and has a guid the server doesn't hold, while a live item of its
+  collection has that identity, is refused as `identity-taken`, with that item as `current`. An
+  edit of an item the server holds is never refused for its identity.
+- **On `identity-taken`** the device opens `current` and works out its identity from what it
+  holds. If it is the same as its own item's, it takes the server's item and removes its own,
+  which was never stored anywhere. If not, or it doesn't open, it keeps its own pending and reports
+  the refusal.
+- **In a pull**, an item under a guid this device doesn't hold, live, whose identity this device
+  works out to be that of one of its own items that is pending and was never stored or sent, is the
+  same thing: the device takes it and removes its own. So a device that comes back to a bucket
+  with all it holds pending, as after setting sync up again, joins its items to the server's
+  before it pushes.
+
+No device trusts an item's `identity` from the server: it always works it out from the content.
 
 ### Merging
 
@@ -238,8 +267,9 @@ An item sealed under a key the device doesn't hold is kept as locked. A locked i
 unverified: it changes nothing the device holds and is never sent on, and an app must not trust
 what it shows.
 
-The server can still see collection and datatype names, guids, timestamps, public parts, sizes and
-timing. It can withhold items or stop answering. It can hand a device an older version that a key
+The server can still see collection and datatype names, guids, timestamps, public parts, sizes,
+timing, and which items are one thing, by their identities. It can refuse a push as
+`identity-taken` with no cause, which is withholding. It can withhold items or stop answering. It can hand a device an older version that a key
 holder really wrote: a new device may get old data or miss deletes, and a merger may merge an old
 version back in. It can try passphrases offline against the sealed copies, so a passphrase a
 person chose protects the data only as well as it was chosen; backup and join codes are random,
@@ -289,6 +319,9 @@ back, even when cleanup removes the item that had the highest number. For each i
 - **Refused** — the item is wrong: `{"ok": false, "code": "...", "error": "..."}`. The code is
   `timestamp-ahead` (more than an hour ahead of the server's clock), `too-big` (over the server's
   item limit) or `invalid`; the error says what, for a person.
+- **Identity taken** — the item is new to the server and live, and a live item of its collection
+  has its identity: `{"ok": false, "code": "identity-taken", "error": "...", "current": {...}}`,
+  with that item. The device checks and takes it, as above.
 
 A push over the server's item count or bytes is refused whole, with status 413 and
 `{"error": "...", "limits": {"item_bytes", "push_items", "push_bytes", "page_bytes"}}`. The device

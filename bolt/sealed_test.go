@@ -248,7 +248,8 @@ func TestPublicPartsRoundTrip(t *testing.T) {
 	pub := json.RawMessage("{\"t\":\"a<b&c> d\"}")
 	var guids []string
 	for _, datatype := range []string{"sealed", "plain"} {
-		guids = append(guids, put(t, mac, synckosh.Item{Collection: "notes", Datatype: datatype, Public: pub}).GUID)
+		guids = append(guids, put(t, mac, synckosh.Item{Collection: "notes", Datatype: datatype, Public: pub,
+			Private: json.RawMessage(`"` + datatype + `"`)}).GUID)
 	}
 	sync(t, mac, phone)
 	for _, guid := range guids {
