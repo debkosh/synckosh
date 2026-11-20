@@ -3,6 +3,7 @@ package synckosh
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/json"
@@ -192,6 +193,7 @@ func (k *DataKey) Open(it Item) (Item, error) {
 // turn the passphrase into the key that opens box, which holds the data key.
 type sealedKey struct {
 	Label string `json:"label"`
+	Code  bool   `json:"code,omitempty"` // a backup code's copy, not a passphrase's
 	Key   string `json:"key"`
 	KDF   string `json:"kdf"`
 	Time  uint32 `json:"t"`
@@ -232,15 +234,19 @@ func (p sealedKey) wrapKey(passphrase string, salt []byte) []byte {
 	return argon2.IDKey([]byte(passphrase), salt, p.Time, p.MemKB, uint8(p.Par), chacha20poly1305.KeySize)
 }
 
-// SealedCopy seals the data key with a passphrase, as a new item for LibraryCollection with its own
-// guid. A bucket can have several, one per passphrase. The device puts it as any item: it is sealed with the data
-// key too, so the server can't alter or forge one.
+// SealedCopy seals the data key with a passphrase, as a new item for LibraryCollection with its
+// own guid. A bucket can have several, one per passphrase. The device puts it as any item: it is
+// sealed with the data key too, so the server can't alter or forge one.
 func (k *DataKey) SealedCopy(passphrase, label string) (Item, error) {
+	return k.sealedCopy(passphrase, label, false)
+}
+
+func (k *DataKey) sealedCopy(passphrase, label string, code bool) (Item, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
 		return Item{}, err
 	}
-	p := sealedKey{Label: label, Key: k.ID, KDF: "argon2id", Time: argonTime, MemKB: argonMemKB, Par: argonPar,
+	p := sealedKey{Label: label, Code: code, Key: k.ID, KDF: "argon2id", Time: argonTime, MemKB: argonMemKB, Par: argonPar,
 		Salt: base64.RawStdEncoding.EncodeToString(salt)}
 	var err error
 	if p.Box, err = seal(p.wrapKey(passphrase, salt), k.key[:], []byte(k.ID)); err != nil {
@@ -263,8 +269,38 @@ func (k *DataKey) BackupCode(label string) (code string, copy Item, err error) {
 		groups, s = append(groups, s[:4]), s[4:]
 	}
 	code = strings.Join(append(groups, s), "-")
-	copy, err = k.SealedCopy(code, label)
+	copy, err = k.sealedCopy(code, label, true)
 	return code, copy, err
+}
+
+// CopyInfo is what a sealed copy says of itself, readable without its passphrase.
+type CopyInfo struct {
+	Label      string
+	KeyID      string // the id of the data key it holds
+	BackupCode bool   // a backup code's copy, not a passphrase's
+}
+
+// ReadCopy reads a sealed copy's label, key id and kind.
+func ReadCopy(it Item) (CopyInfo, error) {
+	var p sealedKey
+	if it.Collection != LibraryCollection || it.Datatype != SealedKeyDatatype || json.Unmarshal(it.Public, &p) != nil {
+		return CopyInfo{}, fmt.Errorf("%s %s: not a sealed copy", it.Collection, it.GUID)
+	}
+	return CopyInfo{Label: p.Label, KeyID: p.Key, BackupCode: p.Code}, nil
+}
+
+// Unlocks says whether a passphrase opens a sealed copy, as a device holds it, to this key.
+func (k *DataKey) Unlocks(it Item, passphrase string) bool {
+	var p sealedKey
+	if it.Deleted || json.Unmarshal(it.Public, &p) != nil || p.Key != k.ID {
+		return false
+	}
+	salt, err := p.check()
+	if err != nil {
+		return false
+	}
+	raw, err := open(p.wrapKey(passphrase, salt), p.Box, []byte(p.Key))
+	return err == nil && subtle.ConstantTimeCompare(raw, k.key[:]) == 1
 }
 
 // OpenSealedCopy opens a sealed copy, as the server sent it, with its passphrase. The key it

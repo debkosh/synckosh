@@ -89,7 +89,11 @@ const bookmarks = await r.items('bookmarks');
 ```
 
 The data key never leaves the device's key store. A person only ever sees a passphrase, or a
-backup code from `key.BackupCode(label)`, each with its own sealed copy that can be removed alone.
+backup code, each with its own sealed copy that can be removed alone. Before setting up,
+`client.Look` tells a new bucket from one with a key, so the app asks for a new passphrase or the
+existing one. A device that holds the key checks a passphrase with `r.CheckPassphrase`, changes it
+with `r.SetPassphrase`, adds a backup code with `r.AddBackupCode` and lists them with
+`r.Passphrases`.
 
 ## The model
 

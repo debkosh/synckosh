@@ -205,7 +205,8 @@ is an item of `_synckosh`, above, that names its collection.
   its own.
 - **Each passphrase seals its own copy** of the data key, as an item in the `_synckosh`
   collection, datatype `sealedkey`. Its public part is what a device that hasn't unlocked can
-  read: `{"label", "key", "kdf", "t", "m", "p", "salt", "box"}`. `key` is the data key's id; `kdf`
+  read: `{"label", "code", "key", "kdf", "t", "m", "p", "salt", "box"}`. `code` is true for a backup
+  code's copy and absent for a passphrase's; `key` is the data key's id; `kdf`
   is `argon2id`, with `t` passes, `m` KiB of memory and `p` lanes, over the base64 `salt`, making
   32 bytes; `box` is the data key's 32 bytes sealed with XChaCha20-Poly1305 under those 32 bytes,
   with the data key's id as additional data. The copy is then sealed with the data key like any
@@ -221,7 +222,8 @@ is an item of `_synckosh`, above, that names its collection.
   the other's items as locked, and the fix is to join one device to the other.
 - **A backup or join code** is a random passphrase of 128 bits with its own sealed copy.
 - **Adding, changing or removing a passphrase** is putting, editing or deleting its copy. Removing
-  one doesn't change the data key.
+  one doesn't change the data key. Setting a new passphrase is one write: its copy, and every other
+  passphrase's copy deleted; backup codes stay.
 - **Changing the data key** after a leak is not part of version 1.
 
 ## What sealing protects

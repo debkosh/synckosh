@@ -1,7 +1,7 @@
 import { Clock, MaxAhead } from './clock.js';
 import { Client, TooLargeError } from './client.js';
 import { copyItem, json, toWire, type Item } from './item.js';
-import { DataKey, PassphraseError, UnknownKeyError, openSealedCopy } from './keys.js';
+import { DataKey, PassphraseError, UnknownKeyError, openSealedCopy, readCopy } from './keys.js';
 import type { Entry, Local } from './local.js';
 import {
   cutoff as cutoffOf, DeleteBeforeDatatype, deleteBeforeGUID, isDeleteBefore, LibraryCollection, orDefaults,
@@ -36,6 +36,48 @@ export class BucketResetError extends Error {
   constructor() {
     super('the bucket was reset: set sync up again on this device');
     this.name = 'BucketResetError';
+  }
+}
+
+/** NoKeyError: the passphrase calls need a replica opened with a key. */
+export class NoKeyError extends Error {
+  constructor() {
+    super('this device syncs without a key');
+    this.name = 'NoKeyError';
+  }
+}
+
+/** Passphrase is one of the bucket's sealed copies of this device's key: a passphrase's, or a backup code's. Removing one is deleting it. */
+export interface Passphrase {
+  guid: string;
+  label: string;
+  backupCode: boolean;
+}
+
+/** What a bucket holds, for a device about to set sync up. */
+export type BucketState =
+  /** Holds no item at all: create makes its key. */
+  | 'new'
+  /** Holds a live sealed copy of a key: join opens it with a passphrase. */
+  | 'keyed'
+  /** Holds items and no live sealed copy: its devices sync without a key, or every copy was removed. */
+  | 'plain';
+
+/** look tells what a bucket holds, without a key or a passphrase. */
+export async function look(c: Client, signal?: AbortSignal): Promise<BucketState> {
+  if ((await c.pull({}, 0, 0, signal)).items.length === 0) return 'new';
+  let after = 0;
+  for (;;) {
+    const p = await c.pull({ collections: [LibraryCollection], datatypes: [SealedKeyDatatype] }, after, 0, signal);
+    for (const it of p.items) {
+      if (it.deleted) continue;
+      try {
+        valid(it);
+        return 'keyed';
+      } catch {}
+    }
+    if (!p.more) return 'plain';
+    after = p.next;
   }
 }
 
@@ -353,6 +395,71 @@ export class Replica {
     valid(it);
     const n = new TextEncoder().encode(JSON.stringify(toWire(this.#seal(it)))).length;
     if (n > this.#limits.itemBytes) throw new Error(`${n} bytes sealed, over the item limit of ${this.#limits.itemBytes}`);
+  }
+
+  /** The live sealed copies of this device's key that it holds. */
+  async #copies(): Promise<Item[]> {
+    if (!this.#key) throw new NoKeyError();
+    const id = this.#key.id;
+    return (await this.#local.entries(LibraryCollection))
+      .filter((e) => !e.locked && !e.item.deleted && e.item.datatype === SealedKeyDatatype)
+      .map((e) => e.item)
+      .filter((it) => {
+        try {
+          return readCopy(it).keyId === id;
+        } catch {
+          return false;
+        }
+      });
+  }
+
+  /** passphrases lists the bucket's passphrases and backup codes for this device's key, as of its last sync. */
+  passphrases(): Promise<Passphrase[]> {
+    return this.#run(async () => (await this.#copies()).map((it) => {
+      const c = readCopy(it);
+      return { guid: it.guid, label: c.label, backupCode: c.backupCode };
+    }));
+  }
+
+  /**
+   * checkPassphrase resolves if passphrase opens one of the bucket's copies of this device's key,
+   * as of its last sync, and throws PassphraseError if none. It reads no network.
+   */
+  checkPassphrase(passphrase: string): Promise<void> {
+    return this.#run(async () => {
+      for (const it of await this.#copies()) if (await this.#key!.unlocks(it, passphrase)) return;
+      throw new PassphraseError();
+    });
+  }
+
+  /**
+   * setPassphrase makes passphrase the bucket's passphrase, in one write: a new sealed copy, and
+   * every other passphrase's copy of this device's key deleted. Backup codes stay. The data key
+   * doesn't change, and the next sync sends the change.
+   */
+  setPassphrase(passphrase: string, label: string): Promise<void> {
+    return this.#run(async () => {
+      const old = await this.#copies();
+      const out = [await this.#key!.sealedCopy(passphrase, label)];
+      for (const it of old) {
+        if (readCopy(it).backupCode) continue;
+        it.deleted = true;
+        delete it.sequence;
+        delete it.deletedAt;
+        out.push(it);
+      }
+      await this.#write(out);
+    });
+  }
+
+  /** addBackupCode makes a backup code with its own sealed copy, which the next sync sends. It returns the code, to show once. */
+  addBackupCode(label: string): Promise<string> {
+    return this.#run(async () => {
+      if (!this.#key) throw new NoKeyError();
+      const { code, copy } = await this.#key.backupCode(label);
+      await this.#write([copy]);
+      return code;
+    });
   }
 
   /**

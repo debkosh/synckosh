@@ -74,6 +74,8 @@ const what = (it: Item) => `${it.collection} ${it.guid}`;
 /** The public part of a sealed copy. */
 interface SealedKey {
   label: string;
+  /** A backup code's copy, not a passphrase's. */
+  code?: boolean;
   key: string;
   kdf: string;
   t: number;
@@ -197,8 +199,12 @@ export class DataKey {
    * own guid, to put as any item. A bucket can have several, one per passphrase.
    */
   async sealedCopy(passphrase: string, label: string): Promise<Item> {
+    return this.#sealedCopy(passphrase, label, false);
+  }
+
+  async #sealedCopy(passphrase: string, label: string, code: boolean): Promise<Item> {
     const salt = random(16);
-    const p: SealedKey = { label, key: this.id, kdf: 'argon2id', t: argonTime, m: argonMemKB, p: argonPar,
+    const p: SealedKey = { label, ...(code ? { code: true } : {}), key: this.id, kdf: 'argon2id', t: argonTime, m: argonMemKB, p: argonPar,
       salt: base64(salt), box: '' };
     p.box = seal(await wrapKey(p, passphrase, salt), this.#key, utf8(this.id));
     return { collection: LibraryCollection, datatype: SealedKeyDatatype, guid: newGUID(), timestamp: 0, deleted: false, public: p };
@@ -210,8 +216,38 @@ export class DataKey {
    */
   async backupCode(label: string): Promise<{ code: string; copy: Item }> {
     const code = base32(random(16)).match(/.{1,4}/g)!.join('-');
-    return { code, copy: await this.sealedCopy(code, label) };
+    return { code, copy: await this.#sealedCopy(code, label, true) };
   }
+
+  /** unlocks says whether a passphrase opens a sealed copy, as a device holds it, to this key. */
+  async unlocks(it: Item, passphrase: string): Promise<boolean> {
+    const p = it.public as SealedKey;
+    if (it.deleted || typeof p !== 'object' || p === null || p.key !== this.id) return false;
+    try {
+      const raw = open(await wrapKey(p, passphrase, check(p)), String(p.box ?? ''), utf8(this.id));
+      return raw.length === this.#key.length && raw.every((b, i) => b === this.#key[i]);
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** CopyInfo is what a sealed copy says of itself, readable without its passphrase. */
+export interface CopyInfo {
+  label: string;
+  /** The id of the data key it holds. */
+  keyId: string;
+  /** A backup code's copy, not a passphrase's. */
+  backupCode: boolean;
+}
+
+/** readCopy reads a sealed copy's label, key id and kind. */
+export function readCopy(it: Item): CopyInfo {
+  const p = it.public as SealedKey;
+  if (it.collection !== LibraryCollection || it.datatype !== SealedKeyDatatype || typeof p !== 'object' || p === null) {
+    throw new Error(`${what(it)}: not a sealed copy`);
+  }
+  return { label: String(p.label ?? ''), keyId: String(p.key ?? ''), backupCode: p.code === true };
 }
 
 /**

@@ -9,10 +9,11 @@ export {
 } from './wire.js';
 export { Clock, MaxAhead } from './clock.js';
 export { newGUID } from './guid.js';
-export { DataKey, openSealedCopy, PassphraseError, UnknownKeyError, NotSealedError } from './keys.js';
+export { DataKey, openSealedCopy, readCopy, type CopyInfo, PassphraseError, UnknownKeyError, NotSealedError } from './keys.js';
 export { Client, type ClientOptions, TooLargeError, ServerError } from './client.js';
 export { type Entry, type Local, MemoryLocal } from './local.js';
 export {
   Replica, type Config, type Merger, type PutItem, create, join,
+  look, type BucketState, type Passphrase, NoKeyError,
   LockedError, HasKeyError, BucketResetError, RefusedError, RejectedError, PutError, type Invalid, type Refused, type Rejected,
 } from './replica.js';

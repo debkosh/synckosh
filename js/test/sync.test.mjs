@@ -8,7 +8,7 @@ import { join as path } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   Client, MemoryLocal, Replica, create, join, newGUID, DataKey, HasKeyError, PassphraseError,
-  RejectedError, BucketResetError, LibraryCollection,
+  RejectedError, BucketResetError, NoKeyError, look, LibraryCollection,
 } from '../dist/synckosh.js';
 
 const repo = new URL('../..', import.meta.url).pathname;
@@ -152,6 +152,29 @@ await test('after the server loses a bucket, the devices push everything back', 
   const b = await device(token, key);
   await b.sync();
   assert.deepEqual(await texts(b, 'todos'), ['kept']);
+});
+
+await test('look, and a device that holds the key checks, changes and adds passphrases', async () => {
+  const token = bucket();
+  const c = new Client({ url, token });
+  assert.equal(await look(c), 'new');
+  const key = await create(c, passphrase, 'Main');
+  assert.equal(await look(c), 'keyed');
+  const a = await device(token, key);
+  await a.sync();
+  await a.checkPassphrase(passphrase);
+  await assert.rejects(a.checkPassphrase('wrong'), PassphraseError);
+  const code = await a.addBackupCode('Printed');
+  await a.setPassphrase('a second passphrase', 'Main');
+  await a.sync();
+  const ps = await a.passphrases();
+  assert.deepEqual(ps.map((p) => [p.label, p.backupCode]).sort(), [['Main', false], ['Printed', true]]);
+  await assert.rejects(join(c, passphrase), PassphraseError);
+  for (const p of ['a second passphrase', code]) assert.equal((await join(c, p)).id, key.id);
+  const plain = await device(bucket(), undefined);
+  await plain.put({ guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'plain' } });
+  await plain.sync();
+  await assert.rejects(plain.checkPassphrase('x'), NoKeyError);
 });
 
 await test('a bucket with no copy of the key left is reset: the device stops and pushes nothing', async () => {
