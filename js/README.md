@@ -27,6 +27,13 @@ await r.sync(); // throws RefusedError or RejectedError for what didn't sync: th
 const bookmarks = await r.items('bookmarks');
 ```
 
+A person only ever sees a passphrase or a backup code, never the key. On a device that holds the
+key, `r.passphrases()` lists the bucket's copies (label, kind, creation time), `r.addBackupCode(label)`
+returns a code such as `7K4Q-M2XH-9RTD-WC6F-3NVA-8PSE` to show once, `r.checkPassphrase` checks a
+passphrase or a code, `r.setPassphrase` sets a new passphrase and keeps the codes, and
+`r.removePassphrase(guid)` removes one. `join` takes a code as a person types it, so a person who
+forgot the passphrase joins with the code and sets a new one.
+
 `MemoryLocal` keeps the device's copy in memory; for a copy that lasts, implement `Local` (seven
 async methods) over IndexedDB, a file or a database. Crypto is XChaCha20-Poly1305 and Argon2id
 from the audited [@noble/ciphers](https://github.com/paulmillr/noble-ciphers) and

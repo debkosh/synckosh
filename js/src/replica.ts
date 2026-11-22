@@ -49,11 +49,30 @@ export class NoKeyError extends Error {
   }
 }
 
-/** Passphrase is one of the bucket's sealed copies of this device's key: a passphrase's, or a backup code's. Removing one is deleting it. */
+/** NoCopyError: removePassphrase's answer for a guid that isn't a live copy of this device's key. */
+export class NoCopyError extends Error {
+  constructor() {
+    super('no such passphrase or backup code');
+    this.name = 'NoCopyError';
+  }
+}
+
+/**
+ * Passphrase is one of the bucket's sealed copies of this device's key: a passphrase's, or a
+ * backup code's. Its label, kind and creation time are in the clear, so the server can show them
+ * too; only the passphrase and the key are not.
+ */
 export interface Passphrase {
   guid: string;
   label: string;
   backupCode: boolean;
+  /** Undefined for a copy that doesn't say. */
+  created?: Date;
+}
+
+function passphraseOf(it: Item): Passphrase {
+  const c = readCopy(it);
+  return { guid: it.guid, label: c.label, backupCode: c.backupCode, ...(c.created ? { created: c.created } : {}) };
 }
 
 /** What a bucket holds, for a device about to set sync up. */
@@ -456,10 +475,7 @@ export class Replica {
 
   /** passphrases lists the bucket's passphrases and backup codes for this device's key, as of its last sync. */
   passphrases(): Promise<Passphrase[]> {
-    return this.#run(async () => (await this.#copies()).map((it) => {
-      const c = readCopy(it);
-      return { guid: it.guid, label: c.label, backupCode: c.backupCode };
-    }));
+    return this.#run(async () => (await this.#copies()).map(passphraseOf));
   }
 
   /**
@@ -493,13 +509,35 @@ export class Replica {
     });
   }
 
-  /** addBackupCode makes a backup code with its own sealed copy, which the next sync sends. It returns the code, to show once. */
-  addBackupCode(label: string): Promise<string> {
+  /**
+   * addBackupCode makes a backup code with its own sealed copy, which the next sync sends. It
+   * returns the code, to show once, and its copy, to remove later with removePassphrase. How many
+   * codes a bucket has is the app's choice: one that keeps one at a time removes the others after
+   * this.
+   */
+  addBackupCode(label: string): Promise<{ code: string; passphrase: Passphrase }> {
     return this.#run(async () => {
       if (!this.#key) throw new NoKeyError();
       const { code, copy } = await this.#key.backupCode(label);
       await this.#write([copy]);
-      return code;
+      return { code, passphrase: passphraseOf(copy) };
+    });
+  }
+
+  /**
+   * removePassphrase deletes one sealed copy of this device's key, a passphrase's or a backup
+   * code's, by its guid, and the next sync sends the delete. The data key doesn't change. It
+   * removes the last one too: then no new device can join until one is added. It throws
+   * NoCopyError for a guid that isn't one.
+   */
+  removePassphrase(guid: string): Promise<void> {
+    return this.#run(async () => {
+      const it = (await this.#copies()).find((c) => c.guid === guid);
+      if (!it) throw new NoCopyError();
+      it.deleted = true;
+      delete it.sequence;
+      delete it.deletedAt;
+      await this.#write([it]);
     });
   }
 

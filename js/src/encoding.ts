@@ -1,9 +1,10 @@
-// Base64 without padding, standard and URL alphabets, and base32 without padding, as Go's
-// encoding/base64 RawStdEncoding, RawURLEncoding and base32 StdEncoding.WithPadding(NoPadding).
+// Base64 without padding, standard and URL alphabets, as Go's encoding/base64 RawStdEncoding and
+// RawURLEncoding, and Crockford's base32 without padding, for backup codes.
 
 const std = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const url = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
-const b32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+/** @internal Crockford's base32: digits and capitals without I, L, O and U. */
+export const crockford = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
 function encode64(b: Uint8Array, alphabet: string): string {
   let s = '';
@@ -45,18 +46,18 @@ export function unbase64(s: string): Uint8Array {
 }
 
 /** @internal */
-export function base32(b: Uint8Array): string {
+export function base32Crockford(b: Uint8Array): string {
   let s = '', acc = 0, bits = 0;
   for (const byte of b) {
     acc = (acc << 8) | byte;
     bits += 8;
     while (bits >= 5) {
       bits -= 5;
-      s += b32[(acc >> bits) & 31];
+      s += crockford[(acc >> bits) & 31];
     }
     acc &= (1 << bits) - 1;
   }
-  if (bits > 0) s += b32[(acc << (5 - bits)) & 31];
+  if (bits > 0) s += crockford[(acc << (5 - bits)) & 31];
   return s;
 }
 

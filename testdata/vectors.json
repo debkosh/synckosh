@@ -184,5 +184,49 @@
       "identity": "cdf7a672ec01e98698e139c2c2f358e19a805d0ef05bc1c25f323a3687d69462",
       "identity_without_key": "95cb9b4f84ceff132cc7a875d8c192bf4997016a939ee64141c1fd628c0e8738"
     }
-  ]
+  ],
+  "backup_code": {
+    "bytes": "OkF8ngXSiB+2YE3jKa9x",
+    "code": "790Q-S7G5-TA41-ZDK0-9QHJ-KBVH",
+    "typed_as": [
+      "790q-s7g5-ta41-zdk0-9qhj-kbvh",
+      "790QS7G5TA41ZDK09QHJKBVH",
+      "790Q S7G5 TA41 ZDK0 9QHJ KBVH",
+      "79OQ-S7G5-TA4l-ZDKO-9QHJ-KBVH",
+      "790q-s7g5-ta4i-zdk0-9qhj-kbvh"
+    ],
+    "not_codes": [
+      "790Q-S7G5-TA41-ZDK0-9QHJ-KBV",
+      "790Q-S7G5-TA41-ZDK0-9QHJ-KBVHA",
+      "790U-S7G5-TA41-ZDK0-9UHJ-KBVH",
+      "é90Q-SéG5-TA41-ZDK0-9QHJ-KBVH",
+      "790Q-S7G5-TA4ı-ZDK0-9QHJ-KBVH",
+      "790Q-S7G5-TA41-ZDK0-9QHJ-KBß",
+      ""
+    ],
+    "item": {
+      "collection": "_synckosh",
+      "datatype": "sealedkey",
+      "deleted": false,
+      "guid": "019a8f3c-5e21-7b40-9c3d-2f6a1e8b4d0a",
+      "private": {
+        "box": "t/cUhIf+WWz71OOZH/x6+g9vJLxigDuStHL1EfRNSRqHdxayKM4eLjEgfIfC24K8lXYRwKBiLhLIhXhY7uQY+a4QBu4WJpNdcnbHIsfe4eiCMhaVTQMeS4KLt7S0N2H8MQEDG/oDrQ7/8U44PB49RunownrcmJf8DPAkforUN0fgyGXWa4y6nue76nebQetuV530JzJd94EiRtDEbtNGkNWGuyReIwET3qNQ2uHxsshT4a6ZAWyXeuFQtVCNrVqmdf9dNSLuUS9O5O3DXv/Px9niYtDbRHjtc5aZ5QvPZnh8Rdtrgj79ioYONOfIoLfhh58mJYrlUB2d+8ChzmRBr4J3NAd856xK+tJuFViv6nYS64bBW4AUeML+2HFmQaVxM8eTmGuLWcjqQEk10eby4Gu4Zw",
+        "key": "k_4zUqk3LbrtI",
+        "public": true
+      },
+      "public": {
+        "box": "XsBu+T3zUJjbZ1riHrKKsz5VA3AHUMc269gAP+ql5Ya7iKCBSanOXiAZkDOYuRddUAF6s9swQdusluXSXF3x2gap+O4luuJV",
+        "code": true,
+        "created": 1763769600000,
+        "kdf": "argon2id",
+        "key": "k_4zUqk3LbrtI",
+        "label": "Backup, 22 Nov",
+        "m": 65536,
+        "p": 4,
+        "salt": "I0MVJtEHrZWKnmFqaWIGag",
+        "t": 3
+      },
+      "timestamp": 1763769600000
+    }
+  }
 }

@@ -2,11 +2,11 @@
 // replica's own edits.
 import assert from 'node:assert/strict';
 import {
-  newGUID, Clock, MaxAhead, valid, cutoff, validName, DataKey, openSealedCopy,
+  newGUID, Clock, MaxAhead, valid, cutoff, validName, DataKey, openSealedCopy, normalizeCode, readCopy,
   fromWire, toWire, Replica, Client, MemoryLocal, LockedError, PutError, LibraryCollection, SealedKeyDatatype,
   DeleteBeforeDatatype, deleteBeforeGUID,
 } from '../dist/synckosh.js';
-import { base32, base64, base64URL, unbase64 } from '../dist/encoding.js';
+import { base32Crockford, base64, base64URL, unbase64 } from '../dist/encoding.js';
 
 let n = 0;
 async function test(name, fn) {
@@ -27,7 +27,7 @@ await test('encodings are Go\'s', () => {
     assert.equal(base64URL(b), buf.toString('base64url'));
     assert.deepEqual([...unbase64(base64(b))], [...b]);
   }
-  assert.equal(base32(new Uint8Array([0xff, 0, 0x10])), '74ABA');
+  assert.equal(base32Crockford(new Uint8Array([0xff, 0, 0x10])), 'ZW010');
   assert.throws(() => unbase64('QQ=='));
   assert.throws(() => unbase64('Q'));
 });
@@ -105,11 +105,14 @@ await test('seal binds the item, and the library\'s items carry their public par
 await test('sealed copies and backup codes', async () => {
   const key = DataKey.create();
   const { code, copy } = await key.backupCode('Backup');
-  assert.match(code, /^[A-Z2-7]{4}(-[A-Z2-7]{4}){5}-[A-Z2-7]{2}$/);
+  assert.match(code, /^[0-9A-HJKMNP-TV-Z]{4}(-[0-9A-HJKMNP-TV-Z]{4}){5}$/);
+  assert.equal(normalizeCode(code.toLowerCase().replaceAll('-', ' ')), code);
+  assert.equal(readCopy(copy).backupCode, true);
+  assert.ok(Math.abs(readCopy(copy).created.getTime() - Date.now()) < 60_000);
   assert.equal(copy.collection, LibraryCollection);
   assert.equal(copy.datatype, SealedKeyDatatype);
   const sealed = key.seal({ ...copy, guid: newGUID(), timestamp: 1 });
-  const got = await openSealedCopy(sealed, code);
+  const got = await openSealedCopy(sealed, code.replaceAll('-', '').toLowerCase());
   assert.equal(got.id, key.id);
   assert.deepEqual(got.bytes(), key.bytes());
   await assert.rejects(openSealedCopy(sealed, 'wrong'), (e) => e.name === 'PassphraseError');

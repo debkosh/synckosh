@@ -27,6 +27,13 @@ type vectors struct {
 		Passphrase string `json:"passphrase"`
 		Item       Item   `json:"item"`
 	} `json:"sealed_copy"`
+	BackupCode struct {
+		Bytes    string   `json:"bytes"`
+		Code     string   `json:"code"`
+		TypedAs  []string `json:"typed_as"`
+		NotCodes []string `json:"not_codes"`
+		Item     Item     `json:"item"`
+	} `json:"backup_code"`
 	Identities []struct {
 		Public     json.RawMessage `json:"public"`
 		Private    json.RawMessage `json:"private"`
@@ -91,6 +98,27 @@ func TestVectors(t *testing.T) {
 	got, err := OpenSealedCopy(v.SealedCopy.Item, v.SealedCopy.Passphrase)
 	if err != nil || got.ID != key.ID || !bytes.Equal(got.Bytes(), key.Bytes()) {
 		t.Fatalf("the sealed copy: %v", err)
+	}
+	bc := v.BackupCode
+	if raw, _ := base64.RawStdEncoding.DecodeString(bc.Bytes); codeFrom(raw) != bc.Code {
+		t.Errorf("backup code of %s: %s, want %s", bc.Bytes, codeFrom(raw), bc.Code)
+	}
+	for _, typed := range append([]string{bc.Code}, bc.TypedAs...) {
+		if c, ok := NormalizeCode(typed); !ok || c != bc.Code {
+			t.Errorf("%q reads as %q %v, want %s", typed, c, ok, bc.Code)
+		}
+	}
+	for _, s := range bc.NotCodes {
+		if c, ok := NormalizeCode(s); ok {
+			t.Errorf("%q reads as the code %s", s, c)
+		}
+	}
+	info, err := ReadCopy(bc.Item)
+	if err != nil || !info.BackupCode || info.Label != "Backup, 22 Nov" || info.Created.UnixMilli() != 1763769600000 {
+		t.Errorf("the backup code's copy: %+v %v", info, err)
+	}
+	if got, err := OpenSealedCopy(bc.Item, bc.TypedAs[0]); err != nil || got.ID != key.ID {
+		t.Errorf("the backup code's copy, opened with %q: %v", bc.TypedAs[0], err)
 	}
 	if len(v.Identities) == 0 {
 		t.Fatal("no identities")

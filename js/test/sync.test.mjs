@@ -8,7 +8,7 @@ import { join as path } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   Client, MemoryLocal, Replica, create, join, newGUID, DataKey, HasKeyError, PassphraseError,
-  RejectedError, BucketResetError, NoKeyError, look, LibraryCollection,
+  RejectedError, BucketResetError, NoKeyError, NoCopyError, look, LibraryCollection,
 } from '../dist/synckosh.js';
 
 const repo = new URL('../..', import.meta.url).pathname;
@@ -164,7 +164,8 @@ await test('look, and a device that holds the key checks, changes and adds passp
   await a.sync();
   await a.checkPassphrase(passphrase);
   await assert.rejects(a.checkPassphrase('wrong'), PassphraseError);
-  const code = await a.addBackupCode('Printed');
+  const { code, passphrase: made } = await a.addBackupCode('Printed');
+  assert.ok(made.backupCode && made.label === 'Printed' && Math.abs(made.created.getTime() - Date.now()) < 60_000);
   await a.setPassphrase('a second passphrase', 'Main');
   await a.sync();
   const ps = await a.passphrases();
@@ -175,6 +176,33 @@ await test('look, and a device that holds the key checks, changes and adds passp
   await plain.put({ guid: newGUID(), collection: 'todos', datatype: 'todo', private: { text: 'plain' } });
   await plain.sync();
   await assert.rejects(plain.checkPassphrase('x'), NoKeyError);
+});
+
+await test('a forgotten passphrase: join with the code as typed, set a new one, and swap the code', async () => {
+  const token = bucket();
+  const c = new Client({ url, token });
+  const key = await create(c, 'forgotten', 'Main');
+  const a = await device(token, key);
+  await a.sync();
+  const { code, passphrase: first } = await a.addBackupCode('Backup, 22 Nov');
+  await a.checkPassphrase(code);
+  await a.sync();
+  const typed = code.toLowerCase().replaceAll('-', '').replaceAll('0', 'o').replaceAll('1', 'l');
+  const k = await join(c, typed);
+  assert.equal(k.id, key.id);
+  const b = await device(token, k);
+  await b.sync();
+  await b.setPassphrase('remembered', 'Main');
+  const { passphrase: second } = await b.addBackupCode('Backup, 23 Nov');
+  await b.removePassphrase(first.guid);
+  await assert.rejects(b.removePassphrase(first.guid), NoCopyError);
+  await b.sync();
+  await a.sync();
+  const ps = await a.passphrases();
+  assert.deepEqual(ps.map((p) => [p.label, p.backupCode, p.guid === second.guid]).sort(), [['Backup, 23 Nov', true, true], ['Main', false, false]]);
+  assert.ok(ps.every((p) => p.created instanceof Date));
+  await assert.rejects(join(c, code), PassphraseError);
+  assert.equal((await join(c, 'remembered')).id, key.id);
 });
 
 await test('a bucket with no copy of the key left is reset: the device stops and pushes nothing', async () => {

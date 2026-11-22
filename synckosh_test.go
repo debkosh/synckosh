@@ -198,8 +198,8 @@ func TestBackupCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := len(strings.ReplaceAll(code, "-", "")); n != 26 {
-		t.Fatalf("code %q: %d characters, want 26 (128 bits)", code, n)
+	if n, ok := NormalizeCode(code); !ok || n != code || len(strings.ReplaceAll(code, "-", "")) != 24 {
+		t.Fatalf("code %q: want 24 characters (120 bits) in its written form", code)
 	}
 	c.GUID, c.Timestamp = NewGUID(), 1
 	c, _ = k.Seal(c, false)

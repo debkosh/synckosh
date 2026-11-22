@@ -30,7 +30,7 @@ device doesn't hold is kept as locked: unverified, without effect, and never sen
 not trust what it shows. The server still sees collection and datatype names, guids, timestamps,
 public parts, sizes and timing. It can withhold items, stop answering, or hand a device an older
 version a key holder really wrote. It can try passphrases offline against the sealed copies, so a
-passphrase protects the data only as well as it was chosen; backup codes are random, 128 bits.
+passphrase protects the data only as well as it was chosen; backup codes are random, 120 bits.
 Without a key, everything is plain and the server is trusted. The details are in
 [SPEC.md](SPEC.md#what-sealing-protects).
 
@@ -91,9 +91,13 @@ const bookmarks = await r.items('bookmarks');
 The data key never leaves the device's key store. A person only ever sees a passphrase, or a
 backup code, each with its own sealed copy that can be removed alone. Before setting up,
 `client.Look` tells a new bucket from one with a key, so the app asks for a new passphrase or the
-existing one. A device that holds the key checks a passphrase with `r.CheckPassphrase`, changes it
-with `r.SetPassphrase`, adds a backup code with `r.AddBackupCode` and lists them with
-`r.Passphrases`.
+existing one. A device that holds the key checks a passphrase or a code with `r.CheckPassphrase`,
+changes the passphrase with `r.SetPassphrase` (backup codes stay), adds a backup code with
+`r.AddBackupCode`, lists them all with `r.Passphrases` (label, kind, creation time) and removes one
+with `r.RemovePassphrase`. A backup code is a second passphrase the app shows differently: 120
+random bits written as `7K4Q-M2XH-9RTD-WC6F-3NVA-8PSE`, which `Join` and `CheckPassphrase` take as
+a person types it, so a person who forgot the passphrase joins with the code and sets a new one.
+How many codes to keep is the app's choice.
 
 ## The model
 

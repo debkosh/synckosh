@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/sudiptadeb/synckosh"
 )
@@ -53,11 +54,18 @@ func Look(ctx context.Context, c *Client) (BucketState, error) {
 var ErrNoKey = errors.New("this device syncs without a key")
 
 // Passphrase is one of the bucket's sealed copies of this device's key: a passphrase's, or a
-// backup code's. Removing one is deleting its item, LibraryCollection and GUID, with Delete.
+// backup code's. Its label, kind and creation time are in the clear, so the server can show them
+// too; only the passphrase and the key are not.
 type Passphrase struct {
 	GUID       string
 	Label      string
 	BackupCode bool
+	Created    time.Time // zero for a copy that doesn't say
+}
+
+func passphrase(it synckosh.Item) Passphrase {
+	c, _ := synckosh.ReadCopy(it)
+	return Passphrase{GUID: it.GUID, Label: c.Label, BackupCode: c.BackupCode, Created: c.Created}
 }
 
 // copies returns the live sealed copies of this device's key that it holds.
@@ -89,8 +97,7 @@ func (r *Replica) Passphrases() ([]Passphrase, error) {
 	}
 	out := make([]Passphrase, 0, len(its))
 	for _, it := range its {
-		c, _ := synckosh.ReadCopy(it)
-		out = append(out, Passphrase{GUID: it.GUID, Label: c.Label, BackupCode: c.BackupCode})
+		out = append(out, passphrase(it))
 	}
 	return out, nil
 }
@@ -138,16 +145,43 @@ func (r *Replica) SetPassphrase(passphrase, label string) error {
 }
 
 // AddBackupCode makes a backup code, a random passphrase for a person to write down or scan, with
-// its own sealed copy, which the next Sync sends. It returns the code, to show once.
-func (r *Replica) AddBackupCode(label string) (string, error) {
+// its own sealed copy, which the next Sync sends. It returns the code, to show once, and its copy,
+// to remove later with RemovePassphrase. How many codes a bucket has is the app's choice: one that
+// keeps one at a time removes the others after this.
+func (r *Replica) AddBackupCode(label string) (string, Passphrase, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.key == nil {
-		return "", ErrNoKey
+		return "", Passphrase{}, ErrNoKey
 	}
 	code, copy, err := r.key.BackupCode(label)
 	if err != nil {
-		return "", err
+		return "", Passphrase{}, err
 	}
-	return code, r.write(copy)
+	if err := r.write(copy); err != nil {
+		return "", Passphrase{}, err
+	}
+	return code, passphrase(copy), nil
+}
+
+// ErrNoCopy is RemovePassphrase's answer for a guid that isn't a live copy of this device's key.
+var ErrNoCopy = errors.New("no such passphrase or backup code")
+
+// RemovePassphrase deletes one sealed copy of this device's key, a passphrase's or a backup code's,
+// by its GUID, and the next Sync sends the delete. The data key doesn't change. It removes the
+// last one too: then no new device can join until one is added.
+func (r *Replica) RemovePassphrase(guid string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	its, err := r.copies()
+	if err != nil {
+		return err
+	}
+	for _, it := range its {
+		if it.GUID == guid {
+			it.Deleted, it.Sequence, it.DeletedAt = true, 0, 0
+			return r.write(it)
+		}
+	}
+	return ErrNoCopy
 }

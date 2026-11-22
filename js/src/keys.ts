@@ -1,6 +1,6 @@
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { argon2idAsync } from '@noble/hashes/argon2.js';
-import { base32, base64, base64URL, random, unbase64, unutf8, utf8 } from './encoding.js';
+import { base32Crockford, base64, base64URL, crockford, random, unbase64, unutf8, utf8 } from './encoding.js';
 import { newGUID } from './guid.js';
 import { json, type Item } from './item.js';
 import { LibraryCollection, SealedKeyDatatype } from './wire.js';
@@ -76,6 +76,8 @@ interface SealedKey {
   label: string;
   /** A backup code's copy, not a passphrase's. */
   code?: boolean;
+  /** When it was made, in Unix milliseconds. */
+  created?: number;
   key: string;
   kdf: string;
   t: number;
@@ -109,7 +111,29 @@ function check(p: SealedKey): Uint8Array {
   return salt;
 }
 
+/** codeBits is how much a backup code holds: 24 characters of 5 bits, in 6 groups of 4. */
+export const codeBits = 120;
+
+/**
+ * normalizeCode puts what a person typed as a backup code in its written form, as
+ * 7K4Q-M2XH-9RTD-WC6F-3NVA-8PSE: upper case, the look-alikes O as 0 and I and L as 1, and spaces
+ * and dashes anywhere. It returns undefined for text that isn't 24 such characters.
+ */
+export function normalizeCode(s: string): string | undefined {
+  if (/[^\x00-\x7f]/.test(s)) return undefined;
+  const chars = s.toUpperCase().replace(/[- ]/g, '').replace(/O/g, '0').replace(/[IL]/g, '1');
+  if (chars.length !== codeBits / 5 || ![...chars].every((c) => crockford.includes(c))) return undefined;
+  return chars.match(/.{4}/g)!.join('-');
+}
+
+/**
+ * wrapKey turns what a person typed into the key that opens box. A backup code's copy takes the
+ * code in its written form, so a code typed in lowercase, without its dashes or with a look-alike
+ * letter opens it too.
+ */
 function wrapKey(p: SealedKey, passphrase: string, salt: Uint8Array): Promise<Uint8Array> {
+  const c = p.code === true ? normalizeCode(passphrase) : undefined;
+  if (c !== undefined) passphrase = c;
   return argon2idAsync(utf8(passphrase), salt, { t: p.t, m: p.m, p: p.p, dkLen: keySize });
 }
 
@@ -204,18 +228,20 @@ export class DataKey {
 
   async #sealedCopy(passphrase: string, label: string, code: boolean): Promise<Item> {
     const salt = random(16);
-    const p: SealedKey = { label, ...(code ? { code: true } : {}), key: this.id, kdf: 'argon2id', t: argonTime, m: argonMemKB, p: argonPar,
+    const p: SealedKey = { label, ...(code ? { code: true } : {}), created: Date.now(), key: this.id, kdf: 'argon2id', t: argonTime, m: argonMemKB, p: argonPar,
       salt: base64(salt), box: '' };
     p.box = seal(await wrapKey(p, passphrase, salt), this.#key, utf8(this.id));
     return { collection: LibraryCollection, datatype: SealedKeyDatatype, guid: newGUID(), timestamp: 0, deleted: false, public: p };
   }
 
   /**
-   * backupCode makes a random passphrase of 128 bits, for a person to write down or scan, with
-   * its sealed copy. Deleting the copy removes the code without changing the data key.
+   * backupCode makes a random passphrase of 120 bits, written as 7K4Q-M2XH-9RTD-WC6F-3NVA-8PSE,
+   * for a person to write down or scan, with its sealed copy. It is a passphrase like any other,
+   * and join, openSealedCopy and unlocks take it as a person types it. Deleting the copy removes
+   * the code without changing the data key.
    */
   async backupCode(label: string): Promise<{ code: string; copy: Item }> {
-    const code = base32(random(16)).match(/.{1,4}/g)!.join('-');
+    const code = base32Crockford(random(codeBits / 8)).match(/.{4}/g)!.join('-');
     return { code, copy: await this.#sealedCopy(code, label, true) };
   }
 
@@ -239,15 +265,19 @@ export interface CopyInfo {
   keyId: string;
   /** A backup code's copy, not a passphrase's. */
   backupCode: boolean;
+  /** When it was made; undefined for a copy that doesn't say. */
+  created?: Date;
 }
 
-/** readCopy reads a sealed copy's label, key id and kind. */
+/** readCopy reads a sealed copy's label, key id, kind and creation time. */
 export function readCopy(it: Item): CopyInfo {
   const p = it.public as SealedKey;
   if (it.collection !== LibraryCollection || it.datatype !== SealedKeyDatatype || typeof p !== 'object' || p === null) {
     throw new Error(`${what(it)}: not a sealed copy`);
   }
-  return { label: String(p.label ?? ''), keyId: String(p.key ?? ''), backupCode: p.code === true };
+  const c: CopyInfo = { label: String(p.label ?? ''), keyId: String(p.key ?? ''), backupCode: p.code === true };
+  if (Number.isSafeInteger(p.created) && p.created !== 0) c.created = new Date(p.created!);
+  return c;
 }
 
 /**

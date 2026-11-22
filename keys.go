@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +13,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -195,15 +195,16 @@ func (k *DataKey) Open(it Item) (Item, error) {
 // sealedKey is the public part of a sealed copy: what a device that hasn't unlocked needs to
 // turn the passphrase into the key that opens box, which holds the data key.
 type sealedKey struct {
-	Label string `json:"label"`
-	Code  bool   `json:"code,omitempty"` // a backup code's copy, not a passphrase's
-	Key   string `json:"key"`
-	KDF   string `json:"kdf"`
-	Time  uint32 `json:"t"`
-	MemKB uint32 `json:"m"`
-	Par   uint32 `json:"p"`
-	Salt  string `json:"salt"`
-	Box   string `json:"box"`
+	Label   string `json:"label"`
+	Code    bool   `json:"code,omitempty"`    // a backup code's copy, not a passphrase's
+	Created int64  `json:"created,omitempty"` // when it was made, in Unix milliseconds
+	Key     string `json:"key"`
+	KDF     string `json:"kdf"`
+	Time    uint32 `json:"t"`
+	MemKB   uint32 `json:"m"`
+	Par     uint32 `json:"p"`
+	Salt    string `json:"salt"`
+	Box     string `json:"box"`
 }
 
 // Argon2id settings for new sealed copies: RFC 9106's second recommended option.
@@ -233,7 +234,13 @@ func (p sealedKey) check() ([]byte, error) {
 	return salt, nil
 }
 
+// wrapKey turns what a person typed into the key that opens box. A backup code's copy takes the
+// code in its written form, so a code typed in lowercase, without its dashes or with a look-alike
+// letter opens it too.
 func (p sealedKey) wrapKey(passphrase string, salt []byte) []byte {
+	if c, ok := NormalizeCode(passphrase); ok && p.Code {
+		passphrase = c
+	}
 	return argon2.IDKey([]byte(passphrase), salt, p.Time, p.MemKB, uint8(p.Par), chacha20poly1305.KeySize)
 }
 
@@ -249,7 +256,7 @@ func (k *DataKey) sealedCopy(passphrase, label string, code bool) (Item, error) 
 	if _, err := rand.Read(salt); err != nil {
 		return Item{}, err
 	}
-	p := sealedKey{Label: label, Code: code, Key: k.ID, KDF: "argon2id", Time: argonTime, MemKB: argonMemKB, Par: argonPar,
+	p := sealedKey{Label: label, Code: code, Created: time.Now().UnixMilli(), Key: k.ID, KDF: "argon2id", Time: argonTime, MemKB: argonMemKB, Par: argonPar,
 		Salt: base64.RawStdEncoding.EncodeToString(salt)}
 	var err error
 	if p.Box, err = seal(p.wrapKey(passphrase, salt), k.key[:], []byte(k.ID)); err != nil {
@@ -259,19 +266,74 @@ func (k *DataKey) sealedCopy(passphrase, label string, code bool) (Item, error) 
 	return Item{Collection: LibraryCollection, Datatype: SealedKeyDatatype, GUID: NewGUID(), Public: pub}, err
 }
 
-// BackupCode makes a random passphrase of 128 bits, for a person to write down or scan, with
-// its sealed copy. Deleting the copy removes the code without changing the data key.
+// codeAlphabet is Crockford's base32: digits and capitals without I, L, O and U, so a code read
+// aloud or copied by hand has no two letters that look alike.
+const codeAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+// CodeBits is how much a backup code holds: 24 characters of 5 bits, in 6 groups of 4.
+const CodeBits = 120
+
+// codeFrom writes 15 bytes as a backup code: their bits, most significant first, 5 to a
+// character, in groups of 4 joined by dashes.
+func codeFrom(b []byte) string {
+	var out []byte
+	var acc, n uint
+	for _, c := range b {
+		acc, n = acc<<8|uint(c), n+8
+		for n >= 5 {
+			n -= 5
+			if len(out)%5 == 4 {
+				out = append(out, '-')
+			}
+			out = append(out, codeAlphabet[acc>>n&31])
+		}
+		acc &= 1<<n - 1
+	}
+	return string(out)
+}
+
+// NormalizeCode puts what a person typed as a backup code in its written form, as
+// 7K4Q-M2XH-9RTD-WC6F-3NVA-8PSE: upper case, the look-alikes O as 0 and I and L as 1, and
+// spaces and dashes anywhere. It returns false for text that isn't 24 such characters.
+func NormalizeCode(s string) (string, bool) {
+	var chars []byte
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' {
+			r -= 'a' - 'A'
+		}
+		switch r {
+		case '-', ' ':
+			continue
+		case 'O':
+			r = '0'
+		case 'I', 'L':
+			r = '1'
+		}
+		if r > 127 || strings.IndexByte(codeAlphabet, byte(r)) < 0 {
+			return "", false
+		}
+		chars = append(chars, byte(r))
+	}
+	if len(chars) != CodeBits/5 {
+		return "", false
+	}
+	groups := make([]string, 0, len(chars)/4)
+	for i := 0; i < len(chars); i += 4 {
+		groups = append(groups, string(chars[i:i+4]))
+	}
+	return strings.Join(groups, "-"), true
+}
+
+// BackupCode makes a random passphrase of 120 bits, written as 7K4Q-M2XH-9RTD-WC6F-3NVA-8PSE, for
+// a person to write down or scan, with its sealed copy. It is a passphrase like any other, and
+// Join, OpenSealedCopy and Unlocks take it as a person types it. Deleting the copy removes the
+// code without changing the data key.
 func (k *DataKey) BackupCode(label string) (code string, copy Item, err error) {
-	b := make([]byte, 16)
+	b := make([]byte, CodeBits/8)
 	if _, err := rand.Read(b); err != nil {
 		return "", Item{}, err
 	}
-	s := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(b)
-	var groups []string
-	for len(s) > 4 {
-		groups, s = append(groups, s[:4]), s[4:]
-	}
-	code = strings.Join(append(groups, s), "-")
+	code = codeFrom(b)
 	copy, err = k.sealedCopy(code, label, true)
 	return code, copy, err
 }
@@ -279,17 +341,22 @@ func (k *DataKey) BackupCode(label string) (code string, copy Item, err error) {
 // CopyInfo is what a sealed copy says of itself, readable without its passphrase.
 type CopyInfo struct {
 	Label      string
-	KeyID      string // the id of the data key it holds
-	BackupCode bool   // a backup code's copy, not a passphrase's
+	KeyID      string    // the id of the data key it holds
+	BackupCode bool      // a backup code's copy, not a passphrase's
+	Created    time.Time // when it was made; zero for a copy that doesn't say
 }
 
-// ReadCopy reads a sealed copy's label, key id and kind.
+// ReadCopy reads a sealed copy's label, key id, kind and creation time.
 func ReadCopy(it Item) (CopyInfo, error) {
 	var p sealedKey
 	if it.Collection != LibraryCollection || it.Datatype != SealedKeyDatatype || json.Unmarshal(it.Public, &p) != nil {
 		return CopyInfo{}, fmt.Errorf("%s %s: not a sealed copy", it.Collection, it.GUID)
 	}
-	return CopyInfo{Label: p.Label, KeyID: p.Key, BackupCode: p.Code}, nil
+	c := CopyInfo{Label: p.Label, KeyID: p.Key, BackupCode: p.Code}
+	if p.Created != 0 {
+		c.Created = time.UnixMilli(p.Created)
+	}
+	return c, nil
 }
 
 // Unlocks says whether a passphrase opens a sealed copy, as a device holds it, to this key.

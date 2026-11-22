@@ -1,10 +1,11 @@
 // Every vector in ../testdata/vectors.json, checked as the Go package's vectors_test.go checks
 // it: the additional data, the box made again from what it opens to with its own nonce, the item
-// opened, the sealed copy opened with its passphrase, and items' canonical JSON and identity.
+// opened, the sealed copy opened with its passphrase, a backup code as written and as typed, and
+// items' canonical JSON and identity.
 import { readFileSync } from 'node:fs';
-import { DataKey, fromWire, openSealedCopy, sameContent, identity } from '../dist/synckosh.js';
+import { DataKey, fromWire, openSealedCopy, readCopy, normalizeCode, sameContent, identity } from '../dist/synckosh.js';
 import { additional, sealWith } from '../dist/keys.js';
-import { unbase64, unutf8, utf8 } from '../dist/encoding.js';
+import { base32Crockford, unbase64, unutf8, utf8 } from '../dist/encoding.js';
 
 const v = JSON.parse(readFileSync(new URL('../../testdata/vectors.json', import.meta.url), 'utf8'));
 const key = DataKey.from(v.data_key.id, unbase64(v.data_key.key));
@@ -49,6 +50,15 @@ try {
   if (e.name !== 'PassphraseError') fail('wrong passphrase: ' + e.message);
 }
 
+n++;
+const bc = v.backup_code;
+if (base32Crockford(unbase64(bc.bytes)).match(/.{4}/g).join('-') !== bc.code) fail(`backup code of ${bc.bytes}`);
+for (const typed of [bc.code, ...bc.typed_as]) if (normalizeCode(typed) !== bc.code) fail(`${JSON.stringify(typed)} reads as ${normalizeCode(typed)}`);
+for (const s of bc.not_codes) if (normalizeCode(s) !== undefined) fail(`${JSON.stringify(s)} reads as the code ${normalizeCode(s)}`);
+const bci = fromWire(bc.item), info = readCopy(bci);
+if (!info.backupCode || info.label !== 'Backup, 22 Nov' || info.created?.getTime() !== 1763769600000) fail(`the backup code's copy: ${JSON.stringify(info)}`);
+if ((await openSealedCopy(bci, bc.typed_as[0])).id !== key.id) fail("the backup code's copy opens to another key");
+
 for (const c of v.identities) {
   n++;
   const can = sameContent({ public: c.public, private: c.private });
@@ -61,4 +71,4 @@ if (bad) {
   console.error(`vectors: ${bad} checks of ${n} vectors differ`);
   process.exit(1);
 }
-console.log(`vectors: all ${n} vectors match (${v.items.length} sealed items, the sealed copy and ${v.identities.length} identities)`);
+console.log(`vectors: all ${n} vectors match (${v.items.length} sealed items, the sealed copy, the backup code and ${v.identities.length} identities)`);

@@ -2,7 +2,7 @@
 
 How devices sync a bucket's data through a synckosh server. The Go packages in this repo are
 the reference: `client` for a device, `server` for the server, `bolt` for storage on both.
-[testdata/vectors.json](testdata/vectors.json) holds test vectors for the sealing and for identities.
+[testdata/vectors.json](testdata/vectors.json) holds test vectors for the sealing, backup codes and identities.
 
 ## The model
 
@@ -234,8 +234,10 @@ is an item of `_synckosh`, above, that names its collection.
   its own.
 - **Each passphrase seals its own copy** of the data key, as an item in the `_synckosh`
   collection, datatype `sealedkey`. Its public part is what a device that hasn't unlocked can
-  read: `{"label", "code", "key", "kdf", "t", "m", "p", "salt", "box"}`. `code` is true for a backup
-  code's copy and absent for a passphrase's; `key` is the data key's id; `kdf`
+  read: `{"label", "code", "created", "key", "kdf", "t", "m", "p", "salt", "box"}`. `label` is the
+  app's name for it, such as `Main passphrase` or `Backup, 22 Nov`; `code` is true for a backup
+  code's copy and absent for a passphrase's; `created` is when it was made, in Unix milliseconds,
+  and may be absent; `key` is the data key's id; `kdf`
   is `argon2id`, with `t` passes, `m` KiB of memory and `p` lanes, over the base64 `salt`, making
   32 bytes; `box` is the data key's 32 bytes sealed with XChaCha20-Poly1305 under those 32 bytes,
   with the data key's id as additional data. The copy is then sealed with the data key like any
@@ -249,10 +251,22 @@ is an item of `_synckosh`, above, that names its collection.
   key's first sealed copy. A bucket that holds items has a key on its devices even when no copy is
   left. Two devices that both start a bucket at the very same moment make two keys; each then sees
   the other's items as locked, and the fix is to join one device to the other.
-- **A backup or join code** is a random passphrase of 128 bits with its own sealed copy.
+- **What anyone can read of a copy:** its label, kind and creation time are in the clear, so a
+  server or a settings page can list a bucket's copies, as "2 keys: 20 Nov, 22 Nov", without any
+  secret. The copy's seal holds them too, so the server can't change them unnoticed.
+- **A backup or join code** is a random passphrase of 120 bits with its own sealed copy, its
+  `code` true: 15 random bytes, written as 24 characters of Crockford's base32
+  (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`), their bits most significant first, 5 to a character, in
+  6 groups of 4 joined by `-`, as `7K4Q-M2XH-9RTD-WC6F-3NVA-8PSE`. That written form is the
+  passphrase its copy is sealed with. A device puts what a person types in that form before it
+  tries a code's copy: ASCII letters in upper case, `O` as `0`, `I` and `L` as `1`, spaces and
+  `-` dropped, and then 24 characters of the alphabet, regrouped; text that isn't is tried as
+  typed. A passphrase's copy always takes the text as typed. Anything else, how many codes a
+  bucket keeps and what the app calls them, is the app's.
 - **Adding, changing or removing a passphrase** is putting, editing or deleting its copy. Removing
   one doesn't change the data key. Setting a new passphrase is one write: its copy, and every other
-  passphrase's copy deleted; backup codes stay.
+  passphrase's copy deleted; backup codes stay. So a person who forgot the passphrase joins with a
+  backup code and sets a new one.
 - **Changing the data key** after a leak is not part of version 1.
 
 ## What sealing protects
@@ -273,7 +287,7 @@ timing, and which items are one thing, by their identities. It can refuse a push
 holder really wrote: a new device may get old data or miss deletes, and a merger may merge an old
 version back in. It can try passphrases offline against the sealed copies, so a passphrase a
 person chose protects the data only as well as it was chosen; backup and join codes are random,
-128 bits. Removing a passphrase does not change the data key. Every device that holds the key can
+120 bits. Removing a passphrase does not change the data key. Every device that holds the key can
 write anything. Without a key, everything is plain and the server is trusted.
 
 The seal leaves out `sequence`, `deleted_at`, and the answers' `store` and `next`. Lying about them is withholding or replay, which the server can do anyway. A field
