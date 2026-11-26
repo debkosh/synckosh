@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sudiptadeb/synckosh"
-	"github.com/sudiptadeb/synckosh/bolt"
-	"github.com/sudiptadeb/synckosh/client"
-	"github.com/sudiptadeb/synckosh/server"
+	"github.com/debkosh/synckosh"
+	"github.com/debkosh/synckosh/bolt"
+	"github.com/debkosh/synckosh/client"
+	"github.com/debkosh/synckosh/server"
 )
 
 func auth(r *http.Request) (string, error) {

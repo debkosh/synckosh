@@ -17,7 +17,7 @@ TypeScript, for browsers and Node ([js/](js)). The wire protocol is
 revocation, and no changing the data key yet.
 
 ```sh
-go get github.com/sudiptadeb/synckosh
+go get github.com/debkosh/synckosh
 npm install synckosh
 ```
 

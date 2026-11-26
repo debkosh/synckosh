@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sudiptadeb/synckosh"
-	"github.com/sudiptadeb/synckosh/client"
-	"github.com/sudiptadeb/synckosh/server"
+	"github.com/debkosh/synckosh"
+	"github.com/debkosh/synckosh/client"
+	"github.com/debkosh/synckosh/server"
 )
 
 // forge stores items in bucket "me" as given, each with a new sequence number, as a server that

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/sudiptadeb/synckosh"
-	"github.com/sudiptadeb/synckosh/client"
+	"github.com/debkosh/synckosh"
+	"github.com/debkosh/synckosh/client"
 )
 
 // serverItems returns every item the server holds in bucket "me".

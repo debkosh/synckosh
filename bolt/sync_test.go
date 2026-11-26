@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sudiptadeb/synckosh"
-	"github.com/sudiptadeb/synckosh/client"
-	"github.com/sudiptadeb/synckosh/server"
+	"github.com/debkosh/synckosh"
+	"github.com/debkosh/synckosh/client"
+	"github.com/debkosh/synckosh/server"
 )
 
 // The tests sign in with a header naming the bucket: signing in is the host's business.

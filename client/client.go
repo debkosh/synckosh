@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sudiptadeb/synckosh"
+	"github.com/debkosh/synckosh"
 )
 
 // Client speaks the protocol, version 1.

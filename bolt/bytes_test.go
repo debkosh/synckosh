@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/sudiptadeb/synckosh"
-	"github.com/sudiptadeb/synckosh/client"
+	"github.com/debkosh/synckosh"
+	"github.com/debkosh/synckosh/client"
 )
 
 // notes counts the notes made, so each holds its own text: two that hold the same are one thing.

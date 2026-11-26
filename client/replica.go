@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sudiptadeb/synckosh"
+	"github.com/debkosh/synckosh"
 )
 
 // Entry is an item as a device keeps it: opened, and marked pending until the server has it.

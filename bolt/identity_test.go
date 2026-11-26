@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sudiptadeb/synckosh"
-	"github.com/sudiptadeb/synckosh/client"
+	"github.com/debkosh/synckosh"
+	"github.com/debkosh/synckosh/client"
 )
 
 // byURL is an app's identity for bookmarks: the address, whatever the title.

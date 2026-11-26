@@ -1,4 +1,4 @@
-module github.com/sudiptadeb/synckosh
+module github.com/debkosh/synckosh
 
 go 1.26.0
 

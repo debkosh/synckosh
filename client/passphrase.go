@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/sudiptadeb/synckosh"
+	"github.com/debkosh/synckosh"
 )
 
 // What a bucket holds, for a device about to set sync up: Look tells which, so the app asks for a

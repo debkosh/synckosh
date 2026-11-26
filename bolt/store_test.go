@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sudiptadeb/synckosh/server"
-	"github.com/sudiptadeb/synckosh/server/storetest"
+	"github.com/debkosh/synckosh/server"
+	"github.com/debkosh/synckosh/server/storetest"
 )
 
 func TestStore(t *testing.T) {

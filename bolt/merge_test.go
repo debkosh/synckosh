@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/sudiptadeb/synckosh"
-	"github.com/sudiptadeb/synckosh/client"
+	"github.com/debkosh/synckosh"
+	"github.com/debkosh/synckosh/client"
 )
 
 // tagSet merges items whose private part is {"tags": [...]}, a set that only grows; an edit

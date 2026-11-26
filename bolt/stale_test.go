@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sudiptadeb/synckosh/client"
+	"github.com/debkosh/synckosh/client"
 )
 
 const cleanupAge = 400 * time.Millisecond

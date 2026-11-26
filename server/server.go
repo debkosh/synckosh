@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sudiptadeb/synckosh"
+	"github.com/debkosh/synckosh"
 )
 
 // Store keeps each bucket's items. Items are stored as given, Sequence and DeletedAt included.

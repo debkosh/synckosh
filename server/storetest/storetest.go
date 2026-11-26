@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sudiptadeb/synckosh"
-	"github.com/sudiptadeb/synckosh/server"
+	"github.com/debkosh/synckosh"
+	"github.com/debkosh/synckosh/server"
 )
 
 // Run runs every check, each on a new empty store from open.
