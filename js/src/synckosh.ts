@@ -1,5 +1,5 @@
 // synckosh: end-to-end encrypted sync, the device side. The protocol is SPEC.md in
-// https://github.com/sudiptadeb/synckosh; the server is the Go package there.
+// https://github.com/debkosh/synckosh; the server is the Go package there.
 
 export { type Item, type WireItem, toWire, fromWire } from './item.js';
 export {

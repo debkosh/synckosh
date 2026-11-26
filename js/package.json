@@ -36,10 +36,10 @@
   "author": "Sudipta Deb",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sudiptadeb/synckosh.git",
+    "url": "git+https://github.com/debkosh/synckosh.git",
     "directory": "js"
   },
-  "homepage": "https://github.com/sudiptadeb/synckosh",
+  "homepage": "https://github.com/debkosh/synckosh",
   "engines": {
     "node": ">=20.19"
   },
