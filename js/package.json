@@ -1,6 +1,6 @@
 {
   "name": "synckosh",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "End-to-end encrypted sync for apps that keep the user's data on their devices: the device side, for browsers and Node.",
   "type": "module",
   "main": "./dist/synckosh.js",
